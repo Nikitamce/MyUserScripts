@@ -7,6 +7,8 @@
 // @match        https://ecosia.org/*
 // @grant        none
 // @run-at       document-idle
+// @license MIT
+
 // ==/UserScript==
 
 (() => {
