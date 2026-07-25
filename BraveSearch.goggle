@@ -2,5 +2,6 @@
 ! description: Поднимает страницы нужные мне
 ! public: false
 ! author: Nikitamce
+! avatar: #66CDAA
 
-$boost=5,site=ru.kinorium.com
+$boost,site=kinorium.com
