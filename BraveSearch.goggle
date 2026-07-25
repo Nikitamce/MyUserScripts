@@ -1,0 +1,6 @@
+! name: Kinorium RU boost
+! description: Поднимает русскоязычные страницы Kinorium в Brave Search.
+! public: false
+! author: Nikitamce
+
+$boost=10,site=ru.kinorium.com
