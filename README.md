@@ -1,1 +1,3 @@
 # MyUserScripts
+
+https://github.com/Nikitamce/backloggd-plus/blob/translate/backloggd-plus.user.js тут форк скрипта для сайта с играми BackLOGGED с переведенным русским интерфейсом сайта
