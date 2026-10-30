@@ -34,7 +34,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, font as tkfont
 
 APP_NAME = "Context Menu Hider"
-APP_VERSION = "4.5.2"
+APP_VERSION = "4.6.0"
 
 # ==================== КАТЕГОРИИ ====================
 
@@ -187,8 +187,10 @@ CATEGORY_ORDER = [
     CAT_DOWNLOADS, CAT_PIP, CAT_PAGE_OTHER, CAT_CODE, CAT_OTHER_MENUS,
 ]
 
+PREVIEW_KEY = "__preview__"
+
 NAV_SECTIONS = [
-    ("Обзор", ["__all__", "__selected__", "__new__"]),
+    ("Обзор", ["__all__", "__selected__", "__new__", PREVIEW_KEY]),
     ("По действиям", [
         CAT_LINKS, CAT_IMAGES, CAT_MEDIA, CAT_TEXT, CAT_INPUTS,
         CAT_PAGE, CAT_FRAMES, CAT_PDF, CAT_TABS, CAT_NAV,
@@ -1844,15 +1846,31 @@ def scan_browser(install_dir, profile=None):
         l10n.args["provider"] = provider
     LAST_SCAN["locale"] = l10n.locale
     LAST_SCAN["langpack"] = langpack
+    struct = new_menu_struct()
 
     if ob:
         names = ob.names()
+        markup = [n for n in names
+                  if n.startswith("chrome/browser/content/")
+                  and n.endswith((".xhtml", ".xul", ".inc"))]
+        # browser.xhtml первым: его меню главнее копий в других окнах.
+        markup.sort(key=lambda n: (not n.endswith("/browser.xhtml"), n))
+        for n in markup:
+            try:
+                text = ob.read_text(n)
+                scan_xhtml(text, l10n, found)
+            except Exception:
+                continue
+            try:
+                scan_menu_structure(text, struct, l10n)
+            except Exception:
+                pass
         for n in names:
-            if n.startswith("chrome/browser/content/") and n.endswith((".xhtml", ".xul", ".inc")):
+            if n.endswith("/tab-context-menu.js"):
                 try:
-                    scan_xhtml(ob.read_text(n), l10n, found)
+                    struct["sections"] = parse_menu_sections(ob.read_text(n))
                 except Exception:
-                    continue
+                    pass
         for n in names:
             base = n.rsplit("/", 1)[-1]
             if n.startswith("chrome/") and base in ("nsContextMenu.sys.mjs", "browser-context.js"):
@@ -1890,6 +1908,13 @@ def scan_browser(install_dir, profile=None):
             found[iid] = {
                 "popup": None, "label": "", "tag": "?", "dynamic": True, "hidden": False,
             }
+    try:
+        finalize_menu_structure(struct, found, prefs,
+                                read_default_pref([ob] if ob else [], ALT_LAYOUT_PREF))
+    except Exception:
+        pass
+    MENU_STRUCT.clear()
+    MENU_STRUCT.update(struct)
     for info in found.values():
         info.setdefault("dynamic", False)
         info.setdefault("hidden", False)
@@ -2176,6 +2201,549 @@ def entry_meta_text(entry):
     return "  ·  ".join(p for p in parts if p)
 
 
+# ==================== СТРУКТУРА МЕНЮ: ПРЕДПРОСМОТР И ПОРЯДОК ====================
+
+# Порядок пунктов, разделители и подменю в том виде, как они описаны в
+# разметке браузера. Заполняется при сканировании (scan_browser).
+MENU_STRUCT = {}
+
+ALT_LAYOUT_PREF = "browser.tabs.contextmenu.altstructure.enabled"
+ORDER_BEGIN = "/* ORDER BEGIN: порядок пунктов */"
+ORDER_END = "/* ORDER END */"
+ORDER_REST = 1000
+RAW_ORDER_PREFIX = "raw:"
+
+# Пункты меню вкладки, которые скрыты в разметке, но в обычном окне
+# (одна вкладка, без групп) браузер их показывает.
+PREVIEW_TYPICAL_SHOW = {
+    "context_moveTabToNewGroup", "context_moveTabToSplitView",
+    "context_reopenInContainer", "context_askChat",
+    "context_bookmarkTab", "context_closeTab", "context_closeDuplicateTabs",
+    "context_closeTabOptions", "context_undoCloseTab",
+    "context_reloadTab", "context_toggleMuteTab", "context_pinTab",
+    "context_duplicateTab", "context_sendTabToDevice",
+    "context_sendTabToDeviceSeparator", "context_aiSeparator",
+}
+# И наоборот: видимые в разметке, но обычно скрытые браузером.
+PREVIEW_TYPICAL_HIDE = {
+    "context_reloadSelectedTabs", "context_playTab", "context_playSelectedTabs",
+    "context_toggleMuteSelectedTabs", "context_unpinTab",
+    "context_pinSelectedTabs", "context_unpinSelectedTabs",
+    "context_duplicateTabs", "context_bookmarkSelectedTabs",
+    "context_editNote", "context_moveTabToGroup", "context_ungroupTab",
+    "context_moveSplitViewToNewGroup", "context_ungroupSplitView",
+    "context_separateSplitView", "context_reverseSplitView",
+    "context_shareSelectedTabs", "context_shareSelectedTabsSeparator",
+    "context_fullscreenSeparator", "context_fullscreenAutohide",
+    "context_fullscreenExit", "context_askChatSummarize", "context_createAITab",
+    "context_addNote", "context_toggleToPrivateContainer",
+}
+
+PREVIEW_MENU_NAMES = {
+    "tabContextMenu": "Меню вкладки",
+    "contentAreaContextMenu": "Меню страницы (правый клик по странице)",
+    "toolbar-context-menu": "Меню панели инструментов",
+    "placesContext": "Закладки и история",
+    "sidebar-context-menu": "Боковая панель",
+    "downloadsContextMenu": "Загрузки",
+    "customizationPanelItemContextMenu": "Кнопка в меню переполнения",
+    "unified-extensions-context-menu": "Кнопка расширений",
+    "pageActionContextMenu": "Действия страницы",
+    "open-tab-group-context-menu": "Группа вкладок",
+    "saved-tab-group-context-menu": "Сохранённая группа вкладок",
+    "pictureInPictureToggleContextMenu": "Картинка в картинке",
+}
+PREVIEW_MENU_FIRST = ["tabContextMenu", "contentAreaContextMenu",
+                      "toolbar-context-menu", "placesContext"]
+
+# Что показывает меню страницы в разных ситуациях (примерно, по категориям).
+PREVIEW_CONTEXTS = [
+    ("Всё", None),
+    ("Страница", {CAT_NAV, CAT_PAGE, CAT_PAGE_OTHER}),
+    ("Ссылка", {CAT_LINKS}),
+    ("Изображение", {CAT_IMAGES}),
+    ("Выделение", {CAT_TEXT}),
+    ("Поле ввода", {CAT_INPUTS}),
+    ("Медиа", {CAT_MEDIA}),
+    ("Фрейм", {CAT_FRAMES}),
+    ("PDF", {CAT_PDF}),
+]
+PREVIEW_COMMON_PREFIXES = ("context-inspect", "context-take-screenshot",
+                           "context-sep-screenshots", "context-print-selection")
+
+# Значки: (символ Segoe MDL2 Assets, запасной символ Unicode).
+PREVIEW_ICONS = {
+    "context_openANewTab": ("\ue710", "+"),
+    "context_reloadTab": ("\ue72c", "↻"),
+    "context_reloadSelectedTabs": ("\ue72c", "↻"),
+    "context_toggleMuteTab": ("\ue74f", "♪"),
+    "context_toggleMuteSelectedTabs": ("\ue74f", "♪"),
+    "context_playTab": ("\ue768", "▶"),
+    "context_playSelectedTabs": ("\ue768", "▶"),
+    "context_pinTab": ("\ue718", "⚲"),
+    "context_unpinTab": ("\ue77a", "⚲"),
+    "context_pinSelectedTabs": ("\ue718", "⚲"),
+    "context_unpinSelectedTabs": ("\ue77a", "⚲"),
+    "context_duplicateTab": ("\ue8c8", "⧉"),
+    "context_duplicateTabs": ("\ue8c8", "⧉"),
+    "context_bookmarkTab": ("\ue735", "★"),
+    "context_bookmarkSelectedTabs": ("\ue735", "★"),
+    "context_moveTabOptions": ("\ue8ab", "⇄"),
+    "context_reopenInContainer": ("\ue8a9", "▦"),
+    "context_selectAllTabs": ("\ue8b3", "▢"),
+    "context_sendTabToDevice": ("\ue8ea", "⇥"),
+    "context_closeTab": ("\ue711", "✕"),
+    "context_undoCloseTab": ("\ue7a7", "↶"),
+    "context-back": ("\ue72b", "←"),
+    "context-forward": ("\ue72a", "→"),
+    "context-reload": ("\ue72c", "↻"),
+    "context-stop": ("\ue711", "✕"),
+    "context-bookmarkpage": ("\ue734", "☆"),
+    "context-savepage": ("\ue74e", "⤓"),
+    "context-print-selection": ("\ue749", "⎙"),
+    "context-take-screenshot": ("\ue722", "⌗"),
+    "context-copy": ("\ue8c8", "⧉"),
+    "context-cut": ("\ue8c6", "✂"),
+    "context-paste": ("\ue77f", "⎘"),
+    "context-delete": ("\ue74d", "⌫"),
+    "context-copylink": ("\ue71b", "🔗"),
+    "context-openlinkintab": ("\ue8a7", "↗"),
+    "context-openlink": ("\ue8a7", "↗"),
+    "context-viewimage": ("\ue91b", "▣"),
+    "context-saveimage": ("\ue74e", "⤓"),
+    "context-savelink": ("\ue74e", "⤓"),
+    "context-searchselect": ("\ue721", "⌕"),
+    "context-viewsource": ("\ue943", "</>"),
+    "context-inspect": ("\uec7a", "⌖"),
+    "toolbar-context-undoCloseTab": ("\ue7a7", "↶"),
+    "toolbar-context-reloadSelectedTab": ("\ue72c", "↻"),
+    "share-tab-url-item": ("\ue72d", "⇪"),
+}
+
+
+def _js_block(text, start, open_ch="{", close_ch="}"):
+    """Текст от открывающей скобки до парной закрывающей (с учётом строк)."""
+    depth = 0
+    i = start
+    quote = None
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "\"'`":
+            quote = ch
+        elif ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+        i += 1
+    return None
+
+
+def parse_menu_sections(js_text):
+    """MENU_SECTIONS из tab-context-menu.js:
+    {вариант: {popup: [(раздел, [селекторы], open)]}}."""
+    text = re.sub(r"/\*.*?\*/", "", js_text or "", flags=re.S)
+    text = re.sub(r"(?m)^\s*//.*$", "", text)
+    idx = text.find("MENU_SECTIONS")
+    if idx < 0:
+        return {}
+    brace = text.find("{", idx)
+    block = _js_block(text, brace) if brace >= 0 else None
+    if not block:
+        return {}
+    js = re.sub(r"([{,]\s*)([A-Za-z_$][\w$]*)\s*:", r'\1"\2":', block)
+    js = re.sub(r",(\s*[\]}])", r"\1", js)
+    js = js.replace("'", '"')
+    try:
+        data = json.loads(js)
+    except Exception:
+        return {}
+    out = {}
+
+    def flat(items, acc):
+        for item in items or []:
+            if isinstance(item, str):
+                acc.append(item)
+            elif isinstance(item, list):
+                flat(item, acc)
+            elif isinstance(item, dict) and isinstance(item.get("selector"), str):
+                acc.append(item["selector"])
+        return acc
+
+    for variant, popups in (data or {}).items():
+        if not isinstance(popups, dict):
+            continue
+        vout = {}
+        for pid, sections in popups.items():
+            if not isinstance(sections, list):
+                continue
+            vout[pid] = [(str(s.get("name", "")), flat(s.get("items"), []),
+                          bool(s.get("open")))
+                         for s in sections if isinstance(s, dict)]
+        out[variant] = vout
+    return out
+
+
+def read_default_pref(omnis, name):
+    """Значение pref() по умолчанию из defaults/preferences omni.ja."""
+    rx = re.compile(r'pref\(\s*"%s"\s*,\s*([^)]+?)\s*\)' % re.escape(name))
+    for o in omnis:
+        for fname in ("defaults/preferences/firefox.js",
+                      "defaults/preferences/firefox-branding.js",
+                      "greprefs.js"):
+            try:
+                text = o.read_text(fname)
+            except Exception:
+                continue
+            m = rx.search(text or "")
+            if m:
+                return m.group(1).strip().strip('"')
+    return None
+
+
+def new_menu_struct():
+    return {"popups": {}, "roots": {}, "submenus": {}, "layout": {},
+            "unused": set(), "alt": False, "dynamic": {}, "groups": {}}
+
+
+def scan_menu_structure(text, struct, l10n=None):
+    """Порядок детей каждого контекстного menupopup в разметке."""
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    text = re.sub(r"<(?:html:)?script\b.*?</(?:html:)?script>", "", text,
+                  flags=re.S | re.I)
+    text = re.sub(r"<!\[CDATA\[.*?\]\]>", "", text, flags=re.S)
+    popups = struct["popups"]
+    local = {}
+    stack = []
+    for m in TAG_RE.finditer(text):
+        closing, name, attrs_raw, selfclose = m.groups()
+        lname = name.lower()
+        if closing:
+            for i in range(len(stack) - 1, -1, -1):
+                if stack[i][0] == lname:
+                    del stack[i:]
+                    break
+            continue
+        attrs = {a[0]: (a[1] or a[2]) for a in ATTR_RE.findall(attrs_raw)}
+        if lname in POPUP_TAGS:
+            pid = attrs.get("id")
+            root = next((s[1]["root"] for s in stack
+                         if s[0] in POPUP_TAGS and s[1]["root"]), None)
+            if not root and pid and RELEVANT_POPUP_RE.search(pid):
+                root = pid
+            children = None
+            if pid and root and pid not in popups and pid not in local:
+                children = []
+                local[pid] = children
+                struct["roots"][pid] = root
+                owner = next((s for s in reversed(stack)
+                              if s[0] in POPUP_TAGS or s[0] == "menu"), None)
+                if owner and owner[0] == "menu" and owner[1]:
+                    struct["submenus"][owner[1]] = pid
+            if not selfclose:
+                stack.append((lname, {"id": pid, "root": root,
+                                      "children": children}))
+            continue
+        if lname in ITEM_TAGS:
+            iid = attrs.get("id")
+            parent = next((s for s in reversed(stack)
+                           if s[0] in POPUP_TAGS or s[0] in ("menu", "menugroup")),
+                          None)
+            label = ""
+            lid = attrs.get("data-l10n-id") or attrs.get("data-lazy-l10n-id")
+            if l10n is not None and lid and not iid:
+                try:
+                    label = l10n.label(lid)
+                except Exception:
+                    label = ""
+            if not label and not iid and attrs.get("label") and "&" not in attrs["label"]:
+                label = attrs["label"]
+            node = {"id": iid, "tag": lname,
+                    "hidden": attrs.get("hidden") == "true",
+                    "disabled": attrs.get("disabled") == "true",
+                    "label": label, "group": None}
+            if lname == "menugroup":
+                node["group"] = []
+            if parent and parent[0] in POPUP_TAGS and parent[1]["children"] is not None:
+                parent[1]["children"].append(node)
+                node["popup"] = parent[1]["id"]
+            elif parent and parent[0] == "menugroup" and parent[1] is not None:
+                parent[1].append(node)
+            if not selfclose:
+                if lname == "menugroup":
+                    stack.append((lname, node["group"]))
+                else:
+                    stack.append((lname, iid))
+            continue
+        if not selfclose:
+            stack.append((lname, None))
+    popups.update(local)
+
+
+def resolve_layout_selector(struct, found, pid, selector, keys):
+    if re.fullmatch(r"#[\w-]+", selector):
+        iid = selector[1:]
+        if iid in keys or iid in found:
+            return iid
+        return None
+    for k in list(keys) + list(struct["dynamic"].get(pid, [])):
+        if k.startswith(SEL_PREFIX) and selector in k:
+            return k
+    for k, info in found.items():
+        if k.startswith(SEL_PREFIX) and info.get("popup") == pid and selector in k:
+            return k
+    return None
+
+
+def finalize_menu_structure(struct, found, prefs=None, default_alt=None):
+    """Ключи для пунктов без ID, раскладка меню вкладки, пункты из кода."""
+    prefs = prefs or {}
+    in_struct = set()
+    for pid, children in struct["popups"].items():
+        root = struct["roots"].get(pid, pid)
+        counts = {}
+        for i, node in enumerate(children):
+            tag = node["tag"]
+            counts[tag] = counts.get(tag, 0) + 1
+            if node["id"]:
+                node["key"] = node["id"]
+            else:
+                prev = children[i - 1] if i > 0 else None
+                nxt = children[i + 1] if i + 1 < len(children) else None
+                base = "#%s > " % pid if IDENT_RE.match(pid) else '[id="%s"] > ' % pid
+                if prev is not None and prev["id"] and IDENT_RE.match(prev["id"]):
+                    sel = "%s#%s + %s" % (base, prev["id"], tag)
+                elif nxt is not None and nxt["id"] and IDENT_RE.match(nxt["id"]):
+                    sel = "%s%s:has(+ #%s)" % (base, tag, nxt["id"])
+                else:
+                    sel = "%s%s:nth-of-type(%d)" % (base, tag, counts[tag])
+                node["key"] = SEL_PREFIX + sel
+                node["selector"] = sel
+                if node["key"] not in found:
+                    if tag == "menuseparator":
+                        near = ""
+                        if prev is not None and prev["id"] and prev["id"] in found:
+                            near = found[prev["id"]].get("label") or ""
+                            label = ("Разделитель после «%s»" % near) if near else ""
+                        elif nxt is not None and nxt["id"] and nxt["id"] in found:
+                            near = found[nxt["id"]].get("label") or ""
+                            label = ("Разделитель перед «%s»" % near) if near else ""
+                        else:
+                            label = ""
+                        label = label or "Разделитель без ID (%d-й)" % counts[tag]
+                    else:
+                        label = node.get("label") or "Пункт без ID"
+                    found[node["key"]] = {
+                        "popup": root, "label": label, "tag": tag,
+                        "hidden": node["hidden"], "selector": sel,
+                        "dynamic": False, "anon": True,
+                    }
+            in_struct.add(node["key"])
+            for sub in node.get("group") or []:
+                if sub.get("id"):
+                    sub["key"] = sub["id"]
+                    in_struct.add(sub["id"])
+    for k, info in found.items():
+        pid = info.get("popup")
+        if (pid in struct["popups"] and k not in in_struct
+                and (info.get("dynamic") or k.startswith(SEL_PREFIX))
+                and not info.get("anon")):
+            struct["dynamic"].setdefault(pid, []).append(k)
+    raw_alt = prefs.get(ALT_LAYOUT_PREF)
+    if raw_alt is None:
+        raw_alt = default_alt
+    struct["alt"] = str(raw_alt).strip().lower() == "true"
+    sections = struct.get("sections") or {}
+    variant = sections.get("altstructure" if struct["alt"] else "classic") \
+        or sections.get("classic") or {}
+    for pid, secs in variant.items():
+        if pid not in struct["popups"]:
+            continue
+        keys = [n["key"] for n in struct["popups"][pid]]
+        placed = []
+        for name, sels, _open in secs:
+            for sel in sels:
+                k = resolve_layout_selector(struct, found, pid, sel, keys)
+                if k and k not in placed:
+                    placed.append(k)
+                    if name == "unused":
+                        struct["unused"].add(k)
+        struct["layout"][pid] = placed
+
+
+def menu_default_order(pid, struct=None):
+    """Порядок пунктов меню, как его строит браузер (без настроек)."""
+    struct = MENU_STRUCT if struct is None else struct
+    if not struct:
+        return []
+    children = struct.get("popups", {}).get(pid) or []
+    keys = [n["key"] for n in children if n.get("key")]
+    placed = list(struct.get("layout", {}).get(pid) or [])
+    if placed:
+        keys = placed + [k for k in keys if k not in placed]
+    for k in struct.get("dynamic", {}).get(pid, []):
+        if k not in keys:
+            keys.append(k)
+    return keys
+
+
+def menu_node(pid, key, struct=None):
+    struct = MENU_STRUCT if struct is None else struct
+    for node in (struct or {}).get("popups", {}).get(pid) or []:
+        if node.get("key") == key:
+            return node
+    return None
+
+
+def merge_order(custom, default):
+    """Свой порядок + пункты, которых в нём нет (новые версии браузера)."""
+    default = list(default or [])
+    dset = set(default)
+    out = [k for k in (custom or [])
+           if (k in dset or k.startswith(RAW_ORDER_PREFIX)) and k]
+    seen = set(out)
+    for i, k in enumerate(default):
+        if k in seen:
+            continue
+        pos = 0
+        for j in range(i - 1, -1, -1):
+            prev = default[j]
+            if prev in seen:
+                pos = out.index(prev) + 1
+                break
+        out.insert(pos, k)
+        seen.add(k)
+    return out
+
+
+def move_in_order(order, key, before=None, after=None):
+    """Переносит key перед before (или после after) в полном списке."""
+    order = [k for k in order if k != key]
+    if before is not None and before in order:
+        order.insert(order.index(before), key)
+    elif after is not None and after in order:
+        order.insert(order.index(after) + 1, key)
+    else:
+        order.append(key)
+    return order
+
+
+def order_selector(pid, key):
+    if key.startswith(RAW_ORDER_PREFIX):
+        return key[len(RAW_ORDER_PREFIX):]
+    base = "#%s" % pid if IDENT_RE.match(pid) else '[id="%s"]' % pid
+    if key.startswith(SEL_PREFIX):
+        sel = key[len(SEL_PREFIX):].strip()
+        if re.match(r"%s\s*>" % re.escape(base), sel):
+            return sel
+        return "%s > %s" % (base, sel)
+    return "%s > %s" % (base, id_selector(key))
+
+
+def generate_order_css(orders, menu_names=None):
+    """Блок CSS c order для меню, где пользователь поменял порядок."""
+    if not orders:
+        return []
+    menu_names = menu_names or {}
+    lines = ["", ORDER_BEGIN]
+    for pid in sorted(orders):
+        keys = [k for k in orders[pid] if k]
+        if not keys:
+            continue
+        base = "#%s" % pid if IDENT_RE.match(pid) else '[id="%s"]' % pid
+        title = clean_comment_text(menu_names.get(pid) or pid)
+        lines.append(f"/* Порядок: {title} */")
+        lines.append(f"{base} > * {{ order: {ORDER_REST} !important; }}")
+        for n, k in enumerate(keys, 1):
+            lines.append(f"{order_selector(pid, k)} {{ order: {n} !important; }}")
+    lines.append(ORDER_END)
+    return lines
+
+
+ORDER_RULE_RE = re.compile(r"([^{}]+)\{\s*order\s*:\s*(-?\d+)\s*(?:!important)?\s*;?\s*\}")
+
+
+def strip_order_block(text):
+    text = text or ""
+    s = text.find(ORDER_BEGIN)
+    if s < 0:
+        return text
+    e = text.find(ORDER_END, s)
+    if e < 0:
+        return text[:s]
+    return text[:s] + text[e + len(ORDER_END):]
+
+
+def parse_orders(css_text, struct=None):
+    """{popup: [ключи по порядку]} из блока ORDER нашей секции."""
+    text = css_text or ""
+    s = text.find(ORDER_BEGIN)
+    if s < 0:
+        return {}
+    e = text.find(ORDER_END, s)
+    block = text[s + len(ORDER_BEGIN):e if e >= 0 else len(text)]
+    block = re.sub(r"/\*.*?\*/", "", block, flags=re.S)
+    struct = MENU_STRUCT if struct is None else struct
+    rules = {}
+    for m in ORDER_RULE_RE.finditer(block):
+        sel = re.sub(r"\s+", " ", m.group(1)).strip()
+        n = int(m.group(2))
+        pm = re.match(r'(#[\w-]+|\[id="[^"]+"\])\s*>\s*(.+)$', sel)
+        if not pm:
+            continue
+        base, rest = pm.group(1), pm.group(2).strip()
+        pid = base[1:] if base.startswith("#") else base[5:-2]
+        if rest == "*":
+            continue
+        rules.setdefault(pid, []).append((n, sel, rest))
+    out = {}
+    for pid, items in rules.items():
+        known = {}
+        for k in menu_default_order(pid, struct) if struct else []:
+            known[re.sub(r"\s+", " ", order_selector(pid, k))] = k
+        keys = []
+        for n, sel, rest in sorted(items, key=lambda x: x[0]):
+            k = known.get(sel)
+            if k is None:
+                im = re.fullmatch(r"#([\w-]+)", rest)
+                am = re.fullmatch(r'\[id="([^"]+)"\]', rest)
+                if im:
+                    k = im.group(1)
+                elif am:
+                    k = am.group(1)
+                else:
+                    k = RAW_ORDER_PREFIX + sel
+            if k not in keys:
+                keys.append(k)
+        out[pid] = keys
+    return out
+
+
+def preview_menu_ids(struct=None):
+    """Корневые меню, у которых есть что показать."""
+    struct = MENU_STRUCT if struct is None else struct
+    if not struct:
+        return []
+    subs = set(struct.get("submenus", {}).values())
+    ids = [pid for pid, ch in struct.get("popups", {}).items()
+           if pid not in subs and ch and struct["roots"].get(pid) == pid]
+    first = [p for p in PREVIEW_MENU_FIRST if p in ids]
+    rest = sorted((p for p in ids if p not in first),
+                  key=lambda p: (p not in PREVIEW_MENU_NAMES, p.lower()))
+    return first + rest
+
+
+def preview_menu_name(pid):
+    return PREVIEW_MENU_NAMES.get(pid) or ("Меню " + pid)
+
+
 def build_entries(scanned, scan_ok, extensions, new_ids):
     """Собирает все пункты для интерфейса."""
     entries = {}
@@ -2282,7 +2850,8 @@ def clean_comment_text(text):
     return re.sub(r"[\r\n]+", " ", text).replace("*/", "")
 
 
-def generate_css(keys, ext_names=None, raw_selectors=None):
+def generate_css(keys, ext_names=None, raw_selectors=None, orders=None,
+                 menu_names=None):
     ext_names = ext_names or {}
     raw_selectors = [s for s in (raw_selectors or []) if s.strip()]
     keys = list(keys or [])
@@ -2384,6 +2953,11 @@ def generate_css(keys, ext_names=None, raw_selectors=None):
         for rule in full:
             lines.append(rule)
 
+    order_lines = generate_order_css(orders, menu_names)
+    if order_lines:
+        has_rules = True
+        lines += order_lines
+
     if not has_rules:
         lines.append("/* Нет отмеченных пунктов */")
     lines.append(END_MARK)
@@ -2396,7 +2970,7 @@ RULE_RE = re.compile(r"([^{}]+)\{([^{}]*)\}")
 
 def parse_hidden(css_text):
     """Возвращает (ids, ext_wids, all_ext, ext_sep) из активных правил display:none."""
-    text = re.sub(r"/\*.*?\*/", "", css_text, flags=re.S)
+    text = re.sub(r"/\*.*?\*/", "", strip_order_block(css_text), flags=re.S)
     ids, wids = set(), set()
     all_ext = ext_sep = False
     for m in RULE_RE.finditer(text):
@@ -2419,9 +2993,9 @@ def parse_hidden(css_text):
             if wm:
                 wids.add(wm.group(1))
                 continue
-            hm = re.findall(r"#([\w-]+)(?![\w-])", sel)
+            hm = re.search(r"(?:^|[\s>+~])[A-Za-z]*#([\w-]+)$", sel)
             if hm:
-                ids.add(hm[-1])
+                ids.add(hm.group(1))
                 continue
             am = re.fullmatch(r'\[id=["\']([^"\']+)["\']\]', sel)
             if am:
@@ -2431,7 +3005,7 @@ def parse_hidden(css_text):
 
 def parse_hidden_selectors(css_text):
     """Селекторы из активных display:none (нужны для пунктов без ID)."""
-    text = re.sub(r"/\*.*?\*/", "", css_text or "", flags=re.S)
+    text = re.sub(r"/\*.*?\*/", "", strip_order_block(css_text), flags=re.S)
     found = set()
     for m in RULE_RE.finditer(text):
         if not re.search(r"display\s*:\s*none", m.group(2)):
@@ -2450,7 +3024,7 @@ def parse_hidden_selectors(css_text):
 
 def extract_custom_rules(css_text):
     """Содержимое секции «Свои ID и селекторы» для обратного чтения в редактор."""
-    text = css_text or ""
+    text = strip_order_block(css_text or "")
     idx = text.find(CUSTOM_SECTION_COMMENT)
     if idx >= 0:
         section = text[idx + len(CUSTOM_SECTION_COMMENT):]
@@ -3055,6 +3629,7 @@ NAV_NAMES = {
     "__all__": "Все пункты",
     "__selected__": "Выбранные",
     "__new__": "Новое",
+    PREVIEW_KEY: "Предпросмотр меню",
     CAT_MISSING: "Нет в этой версии",
 }
 
@@ -3077,7 +3652,7 @@ class FirefoxContextMenuHider:
         self.entries = {}
         self.checks = set()
         self.saved_state = set()
-        self.saved_sig = ((), ())
+        self.saved_sig = ((), (), ())
         self.ext_names = {}
         self.new_ids = set()
         self.scan_ok = False
@@ -3091,6 +3666,18 @@ class FirefoxContextMenuHider:
         self.profile_choices = []
 
         self.view_key = "__all__"
+        self.orders = {}
+        self.pv_menu = "tabContextMenu"
+        self.pv_stack = []
+        self.pv_context = 1
+        self.pv_result = False
+        self.pv_all = False
+        self.pv_sel = None
+        self._pv_canvas = None
+        self._pv_rows = []
+        self._pv_drag = None
+        self._pv_info = None
+        self._pv_icon_font = None
         self.rows = []
         self.row_by_key = {}
         self.nav_items = {}
@@ -3551,6 +4138,11 @@ class FirefoxContextMenuHider:
                 "Пункты, появившиеся в текущей версии браузера. "
                 "Проверьте их и отметьте лишние.",
             ),
+            PREVIEW_KEY: (
+                "Предпросмотр меню",
+                "Меню в том виде, как его покажет браузер. Щёлкните пункт, чтобы "
+                "скрыть его, перетащите — чтобы поменять порядок.",
+            ),
             CAT_CUSTOM: (
                 "Свои ID и селекторы",
                 "Собственные правила, которых нет во встроенных списках. "
@@ -3584,6 +4176,8 @@ class FirefoxContextMenuHider:
                        if e.get("new") and not e["missing"])
         if key == CAT_CUSTOM:
             return len(parse_custom_lines(self.custom_text)[2])
+        if key == PREVIEW_KEY:
+            return len(preview_menu_ids())
         return sum(1 for e in self.entries.values() if e["category"] == key)
 
     def _update_counts(self):
@@ -3592,7 +4186,8 @@ class FirefoxContextMenuHider:
         for key, item in self.nav_items.items():
             n = self._category_count(key)
             item["count"].configure(text=str(n) if n else "")
-            show = n > 0 or key in ("__all__", "__selected__") or key == self.view_key
+            show = (n > 0 or key in ("__all__", "__selected__", PREVIEW_KEY)
+                    or key == self.view_key)
             if show:
                 item["frame"].grid()
             else:
@@ -3713,7 +4308,8 @@ class FirefoxContextMenuHider:
 
     def _render_view(self, keep_scroll=False):
         fraction = self.list_scroll.fraction() if keep_scroll else 0.0
-        reuse_pool = self._vl_groups is not None and self.view_key != CAT_CUSTOM
+        reuse_pool = (self._vl_groups is not None
+                      and self.view_key not in (CAT_CUSTOM, PREVIEW_KEY))
         if self._vl_groups is not None:
             for index in list(self._vl_live):
                 self._vl_release(index)
@@ -3733,12 +4329,26 @@ class FirefoxContextMenuHider:
         self.row_by_key = {}
         self.empty_row = None
         self._custom_widget = None
+        self._pv_canvas = None
+        self._pv_info = None
         self._grid_index = 0
 
         title, desc = self._view_title_desc()
         self.view_title.configure(text=title)
         self.view_desc.configure(text=desc)
         self._toolbar_for_view()
+
+        if self.view_key == PREVIEW_KEY:
+            self._render_preview_view()
+            n = len(self.orders)
+            self.view_count.configure(
+                text=f"свой порядок: {n} меню" if n
+                else f"{len(preview_menu_ids())} меню")
+            self._update_nav_styles()
+            self._restore_scroll(keep_scroll, fraction)
+            if not keep_scroll:
+                self.root.after_idle(self.list_scroll.to_top)
+            return
 
         if self.view_key == CAT_CUSTOM:
             self._render_custom_view()
@@ -3755,7 +4365,8 @@ class FirefoxContextMenuHider:
     # ---------- виртуальный список ----------
 
     def _vl_active(self):
-        return self._vl_groups is not None and self.view_key != CAT_CUSTOM
+        return (self._vl_groups is not None
+                and self.view_key not in (CAT_CUSTOM, PREVIEW_KEY))
 
     def _reset_virtual(self, keep_pool=False):
         if self._vl_paint_id is not None:
@@ -4373,7 +4984,7 @@ class FirefoxContextMenuHider:
                 "В установленной версии браузера нет таких пунктов.")
 
     def _apply_search(self):
-        if self.view_key == CAT_CUSTOM:
+        if self.view_key in (CAT_CUSTOM, PREVIEW_KEY):
             return
         if self._vl_active():
             self._apply_search_virtual()
@@ -4447,7 +5058,7 @@ class FirefoxContextMenuHider:
     # ---------- панель инструментов ----------
 
     def _toolbar_for_view(self):
-        custom = self.view_key == CAT_CUSTOM
+        custom = self.view_key in (CAT_CUSTOM, PREVIEW_KEY)
         if custom:
             if self.toolbar.winfo_manager():
                 self.toolbar.pack_forget()
@@ -4528,7 +5139,7 @@ class FirefoxContextMenuHider:
             self.search_entry.focus_set()
 
     def _focus_search(self):
-        if self.view_key == CAT_CUSTOM:
+        if self.view_key in (CAT_CUSTOM, PREVIEW_KEY):
             self._select_view("__all__")
         self.search_entry.focus_set()
         self.search_entry.select_range(0, "end")
@@ -4695,6 +5306,655 @@ class FirefoxContextMenuHider:
 
     # ---------- свои ID ----------
 
+    # ---------- предпросмотр меню ----------
+
+    PV_W = 470
+    PV_ROW = 30
+    PV_SEP = 11
+    PV_PAD = 6
+
+    def _pv_colors(self):
+        if self.theme == "dark":
+            return {"bg": "#2b2a33", "border": "#45444f", "text": "#fbfbfe",
+                    "dim": "#8f8f9d", "hover": "#3d3c47", "sep": "#55545f",
+                    "hidden": "#ff8f85", "sel": "#4a3a33", "drag": "#ff7a3d",
+                    "tag_bg": "#3a3944"}
+        return {"bg": "#ffffff", "border": "#cfcfd8", "text": "#15141a",
+                "dim": "#8f8f9d", "hover": "#e8e8ee", "sep": "#d6d6dc",
+                "hidden": "#c4372b", "sel": "#ffe6da", "drag": "#e8601c",
+                "tag_bg": "#f0f0f4"}
+
+    def _pv_current(self):
+        if self.pv_stack:
+            return self.pv_stack[-1][0]
+        return self.pv_menu
+
+    def _pv_full_order(self, pid):
+        default = menu_default_order(pid)
+        if pid in self.orders:
+            return merge_order(self.orders[pid], default)
+        return default
+
+    def _pv_menu_title(self, pid):
+        if pid in PREVIEW_MENU_NAMES or pid in preview_menu_ids():
+            return preview_menu_name(pid)
+        for owner, sub in (MENU_STRUCT.get("submenus") or {}).items():
+            if sub == pid:
+                entry = self.entries.get(owner)
+                return "Подменю «%s»" % (entry["label"] if entry else owner)
+        return pid
+
+    def _pv_situational(self, pid, key, node):
+        if key in PREVIEW_TYPICAL_HIDE or key in (MENU_STRUCT.get("unused") or ()):
+            return True
+        if key in PREVIEW_TYPICAL_SHOW:
+            return False
+        info_hidden = bool(node.get("hidden")) if node else False
+        if not node:
+            entry = self.entries.get(key) or {}
+            # Пункты из кода в конце меню: место примерное, обычно скрыты.
+            if key.startswith("floorp_") or "external-browser" in key:
+                return True
+            return bool(entry.get("missing"))
+        return info_hidden
+
+    def _pv_icon(self, key):
+        icon = PREVIEW_ICONS.get(key)
+        if icon is None and key.startswith(SEL_PREFIX):
+            for name, value in PREVIEW_ICONS.items():
+                if name in key:
+                    icon = value
+                    break
+        if icon is None:
+            return None, None
+        if self._pv_icon_font:
+            return icon[0], self._pv_icon_font
+        return icon[1], (self.f_ui, 10)
+
+    def _pv_model(self):
+        pid = self._pv_current()
+        S = MENU_STRUCT
+        ctx = None
+        if pid == "contentAreaContextMenu" and not self.pv_stack:
+            ctx = PREVIEW_CONTEXTS[self.pv_context][1]
+        rows = []
+        for key in self._pv_full_order(pid):
+            if key.startswith(RAW_ORDER_PREFIX):
+                continue
+            entry = self.entries.get(key)
+            node = menu_node(pid, key) or {}
+            tag = node.get("tag") or (entry or {}).get("tag") or "menuitem"
+            if ctx is not None:
+                cat = entry["category"] if entry else None
+                if cat not in ctx and not key.startswith(PREVIEW_COMMON_PREFIXES):
+                    continue
+            situ = self._pv_situational(pid, key, node)
+            if situ and (self.pv_result or not self.pv_all):
+                continue
+            hidden = key in self.checks
+            if hidden and self.pv_result:
+                continue
+            row = {"key": key, "tag": tag, "situ": situ, "hidden": hidden,
+                   "dynamic": not node, "disabled": bool(node.get("disabled")),
+                   "label": (entry or {}).get("label") or key,
+                   "accesskey": (entry or {}).get("accesskey") or "",
+                   "submenu": None, "group": []}
+            sub = (S.get("submenus") or {}).get(key)
+            if sub and sub in (S.get("popups") or {}):
+                row["submenu"] = sub
+            elif tag == "menu":
+                row["submenu"] = ""
+            if tag == "menugroup":
+                for child in node.get("group") or []:
+                    ck = child.get("key") or child.get("id")
+                    if not ck:
+                        continue
+                    if ck in self.checks and self.pv_result:
+                        continue
+                    row["group"].append(ck)
+                if not row["group"]:
+                    continue
+            rows.append(row)
+        # Браузер не показывает разделители подряд, в начале и в конце меню.
+        out = []
+        for row in rows:
+            if row["tag"] == "menuseparator":
+                if not out or out[-1]["tag"] == "menuseparator":
+                    if not row["hidden"] or self.pv_result:
+                        continue
+            out.append(row)
+        while out and out[-1]["tag"] == "menuseparator" and not out[-1]["hidden"]:
+            out.pop()
+        if self.pv_result:
+            while out and out[-1]["tag"] == "menuseparator":
+                out.pop()
+        return out
+
+    def _render_preview_view(self):
+        pal = self.pal
+        inner = self.list_scroll.inner
+        families = set(tkfont.families(self.root))
+        self._pv_icon_font = None
+        for fam in ("Segoe Fluent Icons", "Segoe MDL2 Assets"):
+            if fam in families:
+                self._pv_icon_font = (fam, 10)
+                break
+        menus = preview_menu_ids()
+        if self.pv_menu not in menus and menus:
+            self.pv_menu = menus[0]
+            self.pv_stack = []
+
+        outer = tk.Frame(inner, bg=pal["bg"])
+        outer.grid(row=0, column=0, sticky="ew", padx=16, pady=(2, 16))
+        outer.grid_columnconfigure(1, weight=1)
+        if not menus:
+            tk.Label(outer, text="Структура меню не прочитана: браузер не найден "
+                                 "или его версия не поддерживается.",
+                     bg=pal["bg"], fg=pal["muted"], font=self.fonts["body"],
+                     anchor="w").grid(row=0, column=0, sticky="w", pady=20)
+            return
+
+        card = tk.Frame(outer, bg=pal["panel"],
+                        highlightbackground=pal["border"], highlightthickness=1)
+        card.grid(row=0, column=0, columnspan=2, sticky="ew")
+        body = tk.Frame(card, bg=pal["panel"])
+        body.pack(fill="x", padx=14, pady=10)
+
+        row1 = tk.Frame(body, bg=pal["panel"])
+        row1.pack(fill="x")
+        tk.Label(row1, text="Меню:", bg=pal["panel"], fg=pal["muted"],
+                 font=self.fonts["small"]).pack(side="left")
+        names = [preview_menu_name(p) for p in menus]
+        self._pv_menu_ids = menus
+        combo = ttk.Combobox(row1, values=names, state="readonly", width=38,
+                             style="CM.TCombobox", font=self.fonts["body"])
+        combo.set(preview_menu_name(self.pv_menu))
+        combo.pack(side="left", padx=(8, 0))
+        combo.bind("<<ComboboxSelected>>",
+                   lambda e, c=combo: self._pv_choose_menu(c.current()))
+        reset = self._make_button(row1, "Сбросить порядок", self._pv_reset_order,
+                                  "ghost", compact=True)
+        reset.pack(side="right")
+        down = self._make_button(row1, "Ниже ↓", lambda: self._pv_step(1),
+                                 "ghost", compact=True)
+        down.pack(side="right", padx=(0, 6))
+        up = self._make_button(row1, "Выше ↑", lambda: self._pv_step(-1),
+                               "ghost", compact=True)
+        up.pack(side="right", padx=(0, 6))
+        self._pv_reset_btn = reset
+
+        if self.pv_menu == "contentAreaContextMenu" and not self.pv_stack:
+            row2 = tk.Frame(body, bg=pal["panel"])
+            row2.pack(fill="x", pady=(8, 0))
+            tk.Label(row2, text="Щелчок по:", bg=pal["panel"], fg=pal["muted"],
+                     font=self.fonts["small"]).pack(side="left", padx=(0, 6))
+            for index, (name, _cats) in enumerate(PREVIEW_CONTEXTS):
+                kind = "accent" if index == self.pv_context else "ghost"
+                btn = self._make_button(
+                    row2, name, lambda i=index: self._pv_set_context(i), kind,
+                    compact=True)
+                btn.pack(side="left", padx=(0, 4))
+
+        row3 = tk.Frame(body, bg=pal["panel"])
+        row3.pack(fill="x", pady=(8, 0))
+        for text, attr in (("Как будет в браузере (без скрытых)", "pv_result"),
+                           ("Показать пункты «по ситуации»", "pv_all")):
+            cb = CmCheckbox(row3, pal, checked=getattr(self, attr), size=18,
+                            command=lambda a=attr: self._pv_flag(a))
+            cb.configure(bg=pal["panel"])
+            cb.pack(side="left", padx=(0, 6))
+            lbl = tk.Label(row3, text=text, bg=pal["panel"], fg=pal["text"],
+                           font=self.fonts["small"], cursor="hand2")
+            lbl.pack(side="left", padx=(0, 18))
+            lbl.bind("<Button-1>", lambda e, c=cb: c._click(e))
+
+        tk.Label(body, text="Щелчок по пункту — скрыть или вернуть. Перетащите пункт "
+                            "или разделитель мышью, чтобы поменять порядок; "
+                            "↑/↓ — выбрать, Alt+↑/↓ — переместить, Пробел — скрыть, "
+                            "→/Enter — открыть подменю, ← — назад.",
+                 bg=pal["panel"], fg=pal["dim"], font=self.fonts["tiny"],
+                 anchor="w", justify="left", wraplength=880).pack(fill="x", pady=(8, 0))
+
+        crumbs = tk.Frame(outer, bg=pal["bg"])
+        crumbs.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 6))
+        if self.pv_stack:
+            back = self._make_button(crumbs, "← Назад", self._pv_back, "ghost",
+                                     compact=True)
+            back.pack(side="left", padx=(0, 8))
+        path = [preview_menu_name(self.pv_menu)] + [t for _p, t in self.pv_stack]
+        tk.Label(crumbs, text="  ›  ".join(path), bg=pal["bg"], fg=pal["text"],
+                 font=self.fonts["body_bold"]).pack(side="left")
+        self._pv_info = tk.Label(crumbs, text="", bg=pal["bg"], fg=pal["muted"],
+                                 font=self.fonts["small"])
+        self._pv_info.pack(side="left", padx=(12, 0))
+
+        canvas = tk.Canvas(outer, width=self.PV_W, height=100, bg=pal["bg"],
+                           highlightthickness=0, bd=0, takefocus=1)
+        canvas.grid(row=2, column=0, sticky="nw")
+        self._pv_canvas = canvas
+        legend = tk.Frame(outer, bg=pal["bg"])
+        legend.grid(row=2, column=1, sticky="nw", padx=(18, 0))
+        for line in (
+            "Зачёркнуто — пункт будет скрыт.",
+            "«по ситуации» — браузер показывает пункт только в особых случаях "
+            "(несколько вкладок, группы, полноэкранный режим и т. п.).",
+            "«из кода» — пункт добавляет скрипт браузера; место примерное.",
+            "Порядок меняется через CSS (order). Клавиатурная навигация в меню "
+            "и автоскрытие разделителей браузер делает по исходному порядку.",
+            "Пункты расширений всегда остаются в конце меню.",
+            "Изменения попадут в userChrome.css после «Применить»; "
+            "затем браузер нужно перезапустить.",
+        ):
+            tk.Label(legend, text="•  " + line, bg=pal["bg"], fg=pal["muted"],
+                     font=self.fonts["small"], anchor="w", justify="left",
+                     wraplength=360).pack(fill="x", pady=(0, 6))
+
+        canvas.bind("<ButtonPress-1>", self._pv_press)
+        canvas.bind("<B1-Motion>", self._pv_motion)
+        canvas.bind("<ButtonRelease-1>", self._pv_release)
+        canvas.bind("<Up>", lambda e: self._pv_key_select(-1))
+        canvas.bind("<Down>", lambda e: self._pv_key_select(1))
+        for mod in ("Alt", "Control"):
+            canvas.bind(f"<{mod}-Up>", lambda e: self._pv_step(-1))
+            canvas.bind(f"<{mod}-Down>", lambda e: self._pv_step(1))
+        canvas.bind("<space>", lambda e: self._pv_toggle_selected())
+        canvas.bind("<Return>", lambda e: self._pv_open_selected())
+        canvas.bind("<Right>", lambda e: self._pv_open_selected())
+        canvas.bind("<Left>", lambda e: self._pv_back())
+        canvas.bind("<BackSpace>", lambda e: self._pv_back())
+        self._pv_draw()
+
+    def _pv_draw(self):
+        canvas = self._pv_canvas
+        if canvas is None:
+            return
+        try:
+            if not canvas.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        c = self._pv_colors()
+        pal = self.pal
+        canvas.delete("all")
+        rows = self._pv_model()
+        self._pv_rows = rows
+        W = self.PV_W
+        font = (self.f_ui, 10)
+        font_i = (self.f_ui, 10, "italic")
+        small = (self.f_ui, 8)
+        y = self.PV_PAD + 2
+        for row in rows:
+            h = self.PV_SEP if row["tag"] == "menuseparator" else self.PV_ROW
+            row["y0"], row["y1"] = y, y + h
+            y += h
+        pid = self._pv_current()
+        ext_note = (not self.pv_stack and pid in ("tabContextMenu", "contentAreaContextMenu")
+                    and any(e.get("kind") == "ext" and not e.get("inactive")
+                            for e in self.entries.values()))
+        total = y + (self.PV_ROW + self.PV_SEP if ext_note else 0) + self.PV_PAD + 2
+        canvas.configure(height=max(total, 60))
+        rounded_rect(canvas, 1, 1, W - 1, total - 1, 8, fill=c["bg"], outline=c["border"])
+        for row in rows:
+            key = row["key"]
+            y0, y1 = row["y0"], row["y1"]
+            selected = key == self.pv_sel
+            dragging = self._pv_drag is not None and self._pv_drag.get("moving") \
+                and self._pv_drag.get("key") == key
+            if selected or dragging:
+                rounded_rect(canvas, 5, y0 + 1, W - 5, y1 - 1, 4,
+                             fill=c["sel"] if dragging else c["hover"],
+                             outline=pal["accent"] if selected else "")
+            if row["tag"] == "menuseparator":
+                mid = (y0 + y1) // 2
+                if row["hidden"]:
+                    canvas.create_line(14, mid, W - 70, mid, fill=c["hidden"],
+                                       dash=(4, 3))
+                    canvas.create_text(W - 12, mid, text="скрыт", anchor="e",
+                                       fill=c["hidden"], font=small)
+                else:
+                    canvas.create_line(14, mid, W - 14, mid, fill=c["sep"])
+                    if row["situ"]:
+                        canvas.create_text(W - 12, mid, text="по ситуации",
+                                           anchor="e", fill=c["dim"], font=small)
+                continue
+            mid = (y0 + y1) // 2
+            fg = c["text"]
+            if row["hidden"]:
+                fg = c["hidden"]
+            elif row["situ"] or row["disabled"]:
+                fg = c["dim"]
+            if row["tag"] == "menugroup":
+                x = 18
+                row["slots"] = []
+                for ck in row["group"]:
+                    glyph, gfont = self._pv_icon(ck)
+                    entry = self.entries.get(ck) or {}
+                    text = glyph or (entry.get("label") or ck)[:2]
+                    cfg = c["hidden"] if ck in self.checks else c["text"]
+                    canvas.create_text(x + 14, mid, text=text, fill=cfg,
+                                       font=gfont or font)
+                    if ck in self.checks:
+                        canvas.create_line(x + 2, mid, x + 26, mid, fill=c["hidden"],
+                                           width=2)
+                    row["slots"].append((x, x + 28, ck))
+                    x += 44
+                canvas.create_text(W - 12, mid, text="кнопки навигации",
+                                   anchor="e", fill=c["dim"], font=small)
+                continue
+            glyph, gfont = self._pv_icon(key)
+            if glyph:
+                canvas.create_text(24, mid, text=glyph, fill=fg, font=gfont)
+            label = row["label"]
+            under = -1
+            ak = row["accesskey"]
+            if ak:
+                pos = label.lower().find(ak.lower())
+                if pos >= 0:
+                    under = pos
+                else:
+                    label = f"{label} ({ak.upper()})"
+                    under = len(label) - 2
+            if len(label) > 52:
+                label = label[:51] + "…"
+                if under >= 51:
+                    under = -1
+            try:
+                tid = canvas.create_text(44, mid, text=label, anchor="w", fill=fg,
+                                         font=font_i if row["situ"] else font,
+                                         underline=under)
+            except tk.TclError:
+                tid = canvas.create_text(44, mid, text=label, anchor="w", fill=fg,
+                                         font=font_i if row["situ"] else font)
+            if row["hidden"]:
+                bbox = canvas.bbox(tid)
+                if bbox:
+                    canvas.create_line(bbox[0] - 2, mid, bbox[2] + 2, mid,
+                                       fill=c["hidden"], width=1)
+            tags = []
+            if row["hidden"]:
+                tags.append(("скрыт", c["hidden"]))
+            if row["situ"]:
+                tags.append(("по ситуации", c["dim"]))
+            if row["dynamic"]:
+                tags.append(("из кода", c["dim"]))
+            x = W - (34 if row["submenu"] is not None else 12)
+            for text, color in tags:
+                tid = canvas.create_text(x, mid, text=text, anchor="e",
+                                         fill=color, font=small)
+                bbox = canvas.bbox(tid)
+                x = (bbox[0] - 8) if bbox else x - 60
+            if row["submenu"] is not None:
+                canvas.create_text(W - 16, mid, text="›", fill=fg,
+                                   font=(self.f_ui, 14))
+        if ext_note:
+            y = rows[-1]["y1"] if rows else self.PV_PAD
+            canvas.create_line(14, y + self.PV_SEP // 2, W - 14, y + self.PV_SEP // 2,
+                               fill=c["sep"], dash=(2, 3))
+            canvas.create_text(44, y + self.PV_SEP + self.PV_ROW // 2,
+                               text="Пункты расширений (всегда в конце)",
+                               anchor="w", fill=c["dim"], font=font_i)
+        drag = self._pv_drag
+        if drag and drag.get("moving") and drag.get("slot") is not None:
+            slot = drag["slot"]
+            if slot < len(rows):
+                ly = rows[slot]["y0"]
+            else:
+                ly = rows[-1]["y1"] if rows else self.PV_PAD
+            canvas.create_line(6, ly, W - 6, ly, fill=c["drag"], width=3)
+            canvas.create_oval(2, ly - 4, 10, ly + 4, fill=c["drag"], outline="")
+        self._pv_update_info()
+
+    def _pv_update_info(self):
+        info = getattr(self, "_pv_info", None)
+        if info is None:
+            return
+        pid = self._pv_current()
+        hidden = sum(1 for k in self._pv_full_order(pid) if k in self.checks)
+        parts = []
+        if hidden:
+            parts.append(f"скрыто: {hidden}")
+        if pid in self.orders:
+            parts.append("порядок изменён")
+        changed = len(self.orders)
+        if changed and (pid not in self.orders or changed > 1):
+            parts.append(f"меню с другим порядком: {changed}")
+        try:
+            info.configure(text=" · ".join(parts))
+        except tk.TclError:
+            pass
+
+    def _pv_row_at(self, y):
+        for index, row in enumerate(self._pv_rows):
+            if row["y0"] <= y < row["y1"]:
+                return index
+        return None
+
+    def _pv_press(self, event):
+        try:
+            self._pv_canvas.focus_set()
+        except tk.TclError:
+            pass
+        index = self._pv_row_at(event.y)
+        if index is None:
+            self._pv_drag = None
+            return
+        row = self._pv_rows[index]
+        self.pv_sel = row["key"]
+        self._pv_drag = {"index": index, "key": row["key"], "x": event.x,
+                         "y": event.y, "moving": False, "slot": None}
+        self._pv_draw()
+
+    def _pv_slot(self, y):
+        rows = self._pv_rows
+        for index, row in enumerate(rows):
+            if y < (row["y0"] + row["y1"]) / 2:
+                return index
+        return len(rows)
+
+    def _pv_motion(self, event):
+        drag = self._pv_drag
+        if not drag:
+            return
+        if not drag["moving"] and abs(event.y - drag["y"]) < 6:
+            return
+        drag["moving"] = True
+        drag["slot"] = self._pv_slot(event.y)
+        try:
+            self._pv_canvas.configure(cursor="fleur")
+        except tk.TclError:
+            pass
+        self._pv_draw()
+
+    def _pv_release(self, event):
+        drag, self._pv_drag = self._pv_drag, None
+        try:
+            self._pv_canvas.configure(cursor="")
+        except tk.TclError:
+            pass
+        if not drag:
+            return
+        rows = self._pv_rows
+        if drag["moving"]:
+            slot = self._pv_slot(event.y)
+            index = drag["index"]
+            if slot in (index, index + 1):
+                self._pv_draw()
+                return
+            if slot < len(rows):
+                self._pv_move(drag["key"], before=rows[slot]["key"])
+            else:
+                self._pv_move(drag["key"], after=rows[-1]["key"])
+            return
+        index = drag["index"]
+        if index >= len(rows):
+            return
+        row = rows[index]
+        if row["tag"] == "menugroup":
+            for x0, x1, ck in row.get("slots") or []:
+                if x0 <= event.x <= x1:
+                    self._pv_toggle(ck)
+                    return
+            self._pv_draw()
+            return
+        if row["submenu"] is not None and event.x >= self.PV_W - 44:
+            if row["submenu"]:
+                self._pv_open(row)
+            else:
+                self._toast("Содержимое этого подменю браузер создаёт сам "
+                            "при открытии — в предпросмотре его нет.", "info")
+            return
+        self._pv_toggle(row["key"])
+
+    def _pv_toggle(self, key):
+        if key not in self.entries:
+            self._toast("Этот пункт нельзя скрыть отсюда — используйте «Свои ID».",
+                        "warn")
+            return
+        self._toggle_entry(key)
+        self._pv_draw()
+
+    def _pv_toggle_selected(self):
+        if self.pv_sel:
+            self._pv_toggle(self.pv_sel)
+        return "break"
+
+    def _pv_open(self, row):
+        if not row.get("submenu"):
+            return
+        self.pv_stack.append((row["submenu"], row["label"]))
+        self.pv_sel = None
+        self._render_view()
+        self._pv_focus()
+
+    def _pv_open_selected(self):
+        for row in self._pv_rows:
+            if row["key"] == self.pv_sel and row.get("submenu"):
+                self._pv_open(row)
+                break
+        return "break"
+
+    def _pv_back(self):
+        if not self.pv_stack:
+            return "break"
+        pid, _title = self.pv_stack.pop()
+        owner = next((k for k, v in (MENU_STRUCT.get("submenus") or {}).items()
+                      if v == pid), None)
+        self.pv_sel = owner
+        self._render_view()
+        self._pv_focus()
+        return "break"
+
+    def _pv_focus(self):
+        try:
+            if self._pv_canvas is not None:
+                self._pv_canvas.focus_set()
+        except tk.TclError:
+            pass
+
+    def _pv_key_select(self, step):
+        rows = self._pv_rows
+        if not rows:
+            return "break"
+        keys = [r["key"] for r in rows]
+        if self.pv_sel in keys:
+            index = max(0, min(len(keys) - 1, keys.index(self.pv_sel) + step))
+        else:
+            index = 0 if step > 0 else len(keys) - 1
+        self.pv_sel = keys[index]
+        self._pv_draw()
+        self._pv_see(rows[index])
+        return "break"
+
+    def _pv_see(self, row):
+        try:
+            canvas = self._pv_canvas
+            sf = self.list_scroll
+            inner_h = max(1, sf.inner.winfo_height())
+            top = canvas.winfo_rooty() - sf.inner.winfo_rooty() + row["y0"]
+            view_h = sf.canvas.winfo_height()
+            first, last = sf.canvas.yview()
+            vis_top = first * inner_h
+            vis_bot = vis_top + view_h
+            if top < vis_top + 10:
+                sf.canvas.yview_moveto(max(0, (top - 40) / inner_h))
+            elif top + self.PV_ROW > vis_bot - 10:
+                sf.canvas.yview_moveto(max(0, (top + 80 - view_h) / inner_h))
+        except (tk.TclError, ZeroDivisionError):
+            pass
+
+    def _pv_step(self, step):
+        rows = self._pv_rows
+        keys = [r["key"] for r in rows]
+        if self.pv_sel not in keys:
+            self._toast("Сначала выберите пункт в меню.", "info")
+            return "break"
+        index = keys.index(self.pv_sel)
+        if step < 0 and index > 0:
+            self._pv_move(self.pv_sel, before=keys[index - 1])
+        elif step > 0 and index < len(keys) - 1:
+            self._pv_move(self.pv_sel, after=keys[index + 1])
+        for row in self._pv_rows:
+            if row["key"] == self.pv_sel:
+                self._pv_see(row)
+        self._pv_focus()
+        return "break"
+
+    def _pv_move(self, key, before=None, after=None):
+        pid = self._pv_current()
+        order = move_in_order(self._pv_full_order(pid), key, before, after)
+        self._pv_set_order(pid, order)
+        self.pv_sel = key
+
+    def _pv_set_order(self, pid, order):
+        default = menu_default_order(pid)
+        if order == default:
+            self.orders.pop(pid, None)
+        else:
+            self.orders[pid] = list(order)
+        self._update_footer()
+        self._pv_draw()
+
+    def _pv_reset_order(self):
+        pid = self._pv_current()
+        if pid not in self.orders:
+            self._toast("Порядок этого меню и так стандартный.", "info")
+            return
+        self.orders.pop(pid, None)
+        self._update_footer()
+        self._pv_draw()
+        self._toast("Порядок меню сброшен. Нажмите «Применить», чтобы записать.",
+                    "ok")
+
+    def _pv_choose_menu(self, index):
+        menus = getattr(self, "_pv_menu_ids", [])
+        if 0 <= index < len(menus):
+            self.pv_menu = menus[index]
+            self.pv_stack = []
+            self.pv_sel = None
+            self._render_view()
+            self._pv_focus()
+
+    def _pv_set_context(self, index):
+        self.pv_context = index
+        self._render_view()
+        self._pv_focus()
+
+    def _pv_flag(self, attr):
+        setattr(self, attr, not getattr(self, attr))
+        self._pv_draw()
+
+    def _orders_sig(self):
+        return tuple(sorted((pid, tuple(v)) for pid, v in self.orders.items()))
+
+    def _orders_for_css(self):
+        out = {}
+        for pid, order in self.orders.items():
+            default = menu_default_order(pid)
+            full = merge_order(order, default) if default else list(order)
+            if full and full != default:
+                out[pid] = full
+        return out
+
     def _render_custom_view(self):
         pal = self.pal
         inner = self.list_scroll.inner
@@ -4854,7 +6114,8 @@ class FirefoxContextMenuHider:
 
     def _signature(self):
         return (tuple(sorted(self.checks)),
-                self._normalized_lines(self.custom_text))
+                self._normalized_lines(self.custom_text),
+                self._orders_sig())
 
     def _is_dirty(self):
         return self._signature() != self.saved_sig
@@ -4872,7 +6133,13 @@ class FirefoxContextMenuHider:
         pal = self.pal
         n = len(self.checks) + len(parse_custom_lines(self.custom_text)[2])
         plural = plural_ru(n, "правило", "правила", "правил")
-        self.apply_btn.configure(text=f"Применить ({n})" if n else "Применить")
+        if self.orders:
+            m = len(self.orders)
+            plural += f" · свой порядок в {m} " + plural_ru(m, "меню", "меню", "меню")
+            n_btn = n + m
+        else:
+            n_btn = n
+        self.apply_btn.configure(text=f"Применить ({n_btn})" if n_btn else "Применить")
         if not self.profile_ok:
             self._set_dot(self.dirty_dot, pal["red"])
             self.dirty_label.configure(
@@ -4887,7 +6154,7 @@ class FirefoxContextMenuHider:
             self._set_dot(self.dirty_dot, pal["green"])
             if self.css_exists:
                 text = f"{n} {plural} · синхронизировано с userChrome.css"
-            elif n:
+            elif n_btn:
                 text = f"{n} {plural} · CSS ещё не создан"
             else:
                 text = "Изменений нет"
@@ -4972,7 +6239,8 @@ class FirefoxContextMenuHider:
             checks.add(SPECIAL_ALL_EXT)
         if ext_sep and SPECIAL_EXT_SEP in self.entries:
             checks.add(SPECIAL_EXT_SEP)
-        extras.extend(extract_custom_rules(managed))
+        extras.extend(x for x in extract_custom_rules(managed)
+                      if SEL_PREFIX + x not in checks)
         return checks, extras
 
     def _reload_all(self, confirm=False, notify_error=False):
@@ -5031,6 +6299,7 @@ class FirefoxContextMenuHider:
         self.ext_names = {ext["wid"]: ext["name"] for ext in extensions}
 
         applied_checks, extras = set(), []
+        orders = {}
         self.state_external = ""
         self.css_exists = False
         if prof:
@@ -5046,13 +6315,25 @@ class FirefoxContextMenuHider:
                 applied_checks, extras = self._state_from_css(
                     ids, wids, all_ext, ext_sep, managed,
                     parse_hidden_selectors(managed))
+                try:
+                    orders = parse_orders(managed)
+                except Exception:
+                    orders = {}
 
         self.checks = set(applied_checks)
         self.saved_state = set(applied_checks)
         self.custom_text = self._merge_custom_text(
             str(self.cfg.get("custom", "") or ""), extras)
+        self.orders = {}
+        for pid, order in orders.items():
+            default = menu_default_order(pid)
+            if not default or merge_order(order, default) != default:
+                self.orders[pid] = order
+        self.pv_stack = []
+        self.pv_sel = None
         self.saved_sig = (tuple(sorted(applied_checks)),
-                          self._normalized_lines("\n".join(extras)))
+                          self._normalized_lines("\n".join(extras)),
+                          self._orders_sig())
         self.pref_state = (userchrome_pref_state(prof, self.browser_name)
                            if prof else None)
 
@@ -5165,7 +6446,9 @@ class FirefoxContextMenuHider:
         for selector in selectors:
             if selector not in raw:
                 raw.append(selector)
-        return generate_css(keys, self.ext_names, raw)
+        orders = self._orders_for_css()
+        names = {pid: self._pv_menu_title(pid) for pid in orders}
+        return generate_css(keys, self.ext_names, raw, orders, names)
 
     def _set_custom_text(self, text):
         self.custom_text = text
