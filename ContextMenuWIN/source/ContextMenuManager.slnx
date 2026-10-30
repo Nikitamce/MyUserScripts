@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CtxMenu.App/CtxMenu.App.csproj" />
+    <Project Path="src/CtxMenu.Core/CtxMenu.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CtxMenu.Core.Tests/CtxMenu.Core.Tests.csproj" />
+  </Folder>
+</Solution>
