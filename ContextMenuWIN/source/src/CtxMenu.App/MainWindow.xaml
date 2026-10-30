@@ -395,6 +395,262 @@
                 </Border>
             </Grid>
 
+            <!-- ================= Page: Live preview ================= -->
+            <Grid Grid.Column="1" DataContext="{Binding PreviewPage}"
+                  Visibility="{Binding DataContext.CurrentPage, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource EqualsToVis}, ConverterParameter=Preview}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <DockPanel Margin="24,16,24,0">
+                    <Button DockPanel.Dock="Right" Command="{Binding RefreshCommand}" Padding="10,4" VerticalAlignment="Top">
+                        <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Glyph}" FontSize="13" Text="&#xE72C;" /><TextBlock Margin="6,0,0,0" Text="{v:T Pv_Refresh}" /></StackPanel>
+                    </Button>
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource PageTitle}" Text="{v:T Nav_Preview}" />
+                        <TextBlock Style="{StaticResource Secondary}" Text="{v:T Pv_Desc}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </DockPanel>
+
+                <!-- Controls -->
+                <Border Grid.Row="1" Style="{StaticResource Card}" Margin="24,12,24,8" Padding="14,10">
+                    <StackPanel>
+                        <TextBlock Text="{v:T Pv_Target}" FontWeight="SemiBold" Margin="0,0,0,6" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <ListBox ItemsSource="{Binding Targets}" SelectedItem="{Binding SelectedTarget, Mode=TwoWay}" Background="Transparent" BorderThickness="0"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled" Padding="0">
+                            <ListBox.ItemsPanel>
+                                <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                            </ListBox.ItemsPanel>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate DataType="{x:Type vm:PreviewTargetOption}">
+                                    <StackPanel Orientation="Horizontal" Margin="2,0">
+                                        <TextBlock Style="{StaticResource Glyph}" FontSize="14" Text="{Binding Glyph}" Margin="0,0,7,0" />
+                                        <TextBlock Text="{Binding Title}" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                        <WrapPanel Margin="0,8,0,0">
+                            <StackPanel Orientation="Horizontal" Margin="0,0,22,4" VerticalAlignment="Center"
+                                        Visibility="{Binding IsFileTarget, Converter={StaticResource BoolToVis}}">
+                                <TextBlock Text="{v:T Pv_Extension}" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                <Grid Width="110">
+                                    <TextBox x:Name="PvExtBox" Text="{Binding Extension, UpdateSourceTrigger=LostFocus}" Padding="8,5" />
+                                    <TextBlock Style="{StaticResource Watermark}" Margin="10,0,0,0" Text="{Binding ExtensionHint}"
+                                               Visibility="{Binding Text, ElementName=PvExtBox, Converter={StaticResource InvBoolToVis}}" />
+                                </Grid>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,22,4" VerticalAlignment="Center">
+                                <TextBlock Text="{v:T Pv_Style}" VerticalAlignment="Center" Margin="0,0,10,0" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                <RadioButton GroupName="PvStyle" Content="{v:T Pv_StyleModern}" IsChecked="{Binding IsModern, Mode=TwoWay}"
+                                             IsEnabled="{Binding ModernAvailable}" Margin="0,0,12,0" MinWidth="0" VerticalAlignment="Center" />
+                                <RadioButton GroupName="PvStyle" Content="{v:T Pv_StyleClassic}" IsChecked="{Binding IsClassic, Mode=TwoWay}" MinWidth="0" VerticalAlignment="Center" />
+                            </StackPanel>
+                            <CheckBox Content="{v:T Pv_ShowDisabled}" IsChecked="{Binding ShowDisabled, Mode=TwoWay}" Margin="0,0,18,4" MinWidth="0" VerticalAlignment="Center" />
+                            <CheckBox Content="{v:T Pv_ShowExtended}" IsChecked="{Binding ShowExtended, Mode=TwoWay}" Margin="0,0,18,4" MinWidth="0" VerticalAlignment="Center" />
+                            <CheckBox Content="{v:T Pv_EditMode}" IsChecked="{Binding EditMode, Mode=TwoWay}" Margin="0,0,18,4" MinWidth="0" VerticalAlignment="Center" />
+                            <CheckBox Content="{v:T Pv_SourceReal}" IsChecked="{Binding UseReal, Mode=TwoWay}" ToolTip="{v:T Pv_SourceRealTip}" Margin="0,0,18,4" MinWidth="0" VerticalAlignment="Center" />
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- "Desktop" with the menu mock -->
+                <Border Grid.Row="2" Margin="24,0,24,8" CornerRadius="8" ClipToBounds="True">
+                    <Border.Background>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                            <GradientStop Color="#FF1B3A6B" Offset="0" />
+                            <GradientStop Color="#FF2F6DB5" Offset="0.55" />
+                            <GradientStop Color="#FF6C9BD2" Offset="1" />
+                        </LinearGradientBrush>
+                    </Border.Background>
+                    <Grid>
+                        <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                            <ItemsControl ItemsSource="{Binding Columns}" Margin="28,24" VerticalAlignment="Top" HorizontalAlignment="Left">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate><StackPanel Orientation="Horizontal" /></ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate DataType="{x:Type vm:PreviewColumnViewModel}">
+                                        <Border Background="{DynamicResource SolidBackgroundFillColorTertiaryBrush}" CornerRadius="8" Margin="0,0,6,16"
+                                                VerticalAlignment="Top" MinWidth="250" MaxWidth="440">
+                                            <Border.Effect>
+                                                <DropShadowEffect BlurRadius="22" ShadowDepth="6" Direction="270" Opacity="0.35" Color="Black" />
+                                            </Border.Effect>
+                                            <Border Background="{DynamicResource FlyoutBackground}" BorderBrush="{DynamicResource SurfaceStrokeColorFlyoutBrush}"
+                                                    BorderThickness="1" CornerRadius="8" Padding="0,4">
+                                                <StackPanel>
+                                                    <!-- Windows 11 icon row -->
+                                                    <StackPanel Visibility="{Binding HasToolbar, Converter={StaticResource BoolToVis}}">
+                                                        <ItemsControl ItemsSource="{Binding Toolbar}" Margin="6,2">
+                                                            <ItemsControl.ItemsPanel>
+                                                                <ItemsPanelTemplate><StackPanel Orientation="Horizontal" /></ItemsPanelTemplate>
+                                                            </ItemsControl.ItemsPanel>
+                                                            <ItemsControl.ItemTemplate>
+                                                                <DataTemplate DataType="{x:Type vm:PreviewItemViewModel}">
+                                                                    <Border x:Name="Tb" Width="40" Height="36" CornerRadius="4" Margin="1,0" Background="Transparent" ToolTip="{Binding Text}">
+                                                                        <Border.InputBindings>
+                                                                            <MouseBinding Gesture="LeftClick" Command="{Binding ToggleCommand}" />
+                                                                        </Border.InputBindings>
+                                                                        <Border.ContextMenu>
+                                                                            <ContextMenu>
+                                                                                <MenuItem Header="{v:T Pv_EditMode}" IsCheckable="True" IsChecked="{Binding IsEnabled, Mode=OneWay}" Command="{Binding ToggleCommand}" />
+                                                                                <MenuItem Header="{v:T Pv_ShowInList}" Command="{Binding ShowInListCommand}" />
+                                                                            </ContextMenu>
+                                                                        </Border.ContextMenu>
+                                                                        <Grid>
+                                                                            <TextBlock x:Name="TbGlyph" Style="{StaticResource Glyph}" Text="{Binding Glyph}" HorizontalAlignment="Center"
+                                                                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                                                            <Path x:Name="TbStrike" Data="M 8,28 L 32,8" Stroke="{StaticResource BadgeDangerFg}" StrokeThickness="1.5" Visibility="Collapsed" />
+                                                                        </Grid>
+                                                                    </Border>
+                                                                    <DataTemplate.Triggers>
+                                                                        <Trigger SourceName="Tb" Property="IsMouseOver" Value="True">
+                                                                            <Setter TargetName="Tb" Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}" />
+                                                                        </Trigger>
+                                                                        <DataTrigger Binding="{Binding IsHidden}" Value="True">
+                                                                            <Setter TargetName="TbGlyph" Property="Opacity" Value="0.35" />
+                                                                            <Setter TargetName="TbStrike" Property="Visibility" Value="Visible" />
+                                                                        </DataTrigger>
+                                                                    </DataTemplate.Triggers>
+                                                                </DataTemplate>
+                                                            </ItemsControl.ItemTemplate>
+                                                        </ItemsControl>
+                                                        <Rectangle Height="1" Margin="0,4" Fill="{DynamicResource DividerStrokeColorDefaultBrush}" />
+                                                    </StackPanel>
+
+                                                    <ItemsControl ItemsSource="{Binding Items}">
+                                                        <ItemsControl.ItemTemplate>
+                                                            <DataTemplate DataType="{x:Type vm:PreviewItemViewModel}">
+                                                                <Grid>
+                                                                    <Rectangle Height="1" Margin="0,4" Fill="{DynamicResource DividerStrokeColorDefaultBrush}"
+                                                                               Visibility="{Binding IsSeparator, Converter={StaticResource BoolToVis}}" />
+                                                                    <Border x:Name="Row" CornerRadius="4" Margin="4,1" Padding="10,0" MinHeight="32" Background="Transparent"
+                                                                            ToolTip="{Binding ToolTip}" Visibility="{Binding IsSeparator, Converter={StaticResource InvBoolToVis}}">
+                                                                        <Border.InputBindings>
+                                                                            <MouseBinding Gesture="LeftClick" Command="{Binding OpenCommand}" />
+                                                                        </Border.InputBindings>
+                                                                        <Border.ContextMenu>
+                                                                            <ContextMenu>
+                                                                                <MenuItem Header="{v:T Pv_EditMode}" IsCheckable="True" IsChecked="{Binding IsEnabled, Mode=OneWay}" Command="{Binding ToggleCommand}" />
+                                                                                <MenuItem Header="{v:T Pv_ToggleShift}" IsCheckable="True" IsChecked="{Binding IsShift, Mode=OneWay}" Command="{Binding ToggleShiftCommand}" />
+                                                                                <Separator />
+                                                                                <MenuItem Header="{v:T Pv_ShowInList}" Command="{Binding ShowInListCommand}" />
+                                                                            </ContextMenu>
+                                                                        </Border.ContextMenu>
+                                                                        <Grid>
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="30" />
+                                                                                <ColumnDefinition Width="*" />
+                                                                                <ColumnDefinition Width="Auto" />
+                                                                                <ColumnDefinition Width="Auto" />
+                                                                                <ColumnDefinition Width="Auto" />
+                                                                                <ColumnDefinition Width="18" />
+                                                                            </Grid.ColumnDefinitions>
+                                                                            <Grid x:Name="IconBox" Width="16" Height="16" HorizontalAlignment="Left" VerticalAlignment="Center">
+                                                                                <Image Source="{Binding Icon}" RenderOptions.BitmapScalingMode="HighQuality"
+                                                                                       Visibility="{Binding HasIcon, Converter={StaticResource BoolToVis}}" />
+                                                                                <TextBlock Style="{StaticResource Glyph}" Text="{Binding Glyph}" FontSize="16" HorizontalAlignment="Center"
+                                                                                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                                                                           Visibility="{Binding HasGlyph, Converter={StaticResource BoolToVis}}" />
+                                                                                <TextBlock Style="{StaticResource Glyph}" Text="&#xE73E;" FontSize="13" HorizontalAlignment="Center"
+                                                                                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                                                                           Visibility="{Binding IsChecked, Converter={StaticResource BoolToVis}}" />
+                                                                                <TextBlock Text="●" FontSize="8" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                                                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                                                                           Visibility="{Binding IsRadio, Converter={StaticResource BoolToVis}}" />
+                                                                            </Grid>
+                                                                            <TextBlock x:Name="ItemText" Grid.Column="1" Text="{Binding Text}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                                                                                       FontSize="14" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                                                            <TextBlock Grid.Column="2" Text="{Binding Shortcut}" VerticalAlignment="Center" Margin="16,0,0,0" FontSize="12"
+                                                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                                                       Visibility="{Binding HasShortcut, Converter={StaticResource BoolToVis}}" />
+                                                                            <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0,0,0">
+                                                                                <Border Style="{StaticResource Badge}" Background="{StaticResource BadgePurpleBg}" TextElement.Foreground="{StaticResource BadgePurpleFg}"
+                                                                                        Visibility="{Binding IsShift, Converter={StaticResource BoolToVis}}">
+                                                                                    <TextBlock Text="{v:T Pv_Badge_Shift}" />
+                                                                                </Border>
+                                                                                <Border Style="{StaticResource Badge}" Background="{StaticResource BadgeDangerBg}" TextElement.Foreground="{StaticResource BadgeDangerFg}"
+                                                                                        Visibility="{Binding IsHidden, Converter={StaticResource BoolToVis}}">
+                                                                                    <TextBlock Text="{v:T Pv_Badge_Off}" />
+                                                                                </Border>
+                                                                            </StackPanel>
+                                                                            <Grid Grid.Column="4" Margin="10,0,0,0"
+                                                                                  Visibility="{Binding DataContext.PreviewPage.EditMode, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVis}}">
+                                                                                <CheckBox Style="{StaticResource SwitchStyle}" IsChecked="{Binding IsEnabled, Mode=TwoWay}" VerticalAlignment="Center"
+                                                                                          Visibility="{Binding IsEditable, Converter={StaticResource BoolToVis}}" />
+                                                                            </Grid>
+                                                                            <TextBlock Grid.Column="5" Style="{StaticResource Glyph}" Text="&#xE76C;" FontSize="11" HorizontalAlignment="Right"
+                                                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                                                       Visibility="{Binding HasSubmenu, Converter={StaticResource BoolToVis}}" />
+                                                                        </Grid>
+                                                                    </Border>
+                                                                </Grid>
+                                                                <DataTemplate.Triggers>
+                                                                    <Trigger SourceName="Row" Property="IsMouseOver" Value="True">
+                                                                        <Setter TargetName="Row" Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}" />
+                                                                    </Trigger>
+                                                                    <DataTrigger Binding="{Binding IsOpen}" Value="True">
+                                                                        <Setter TargetName="Row" Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}" />
+                                                                    </DataTrigger>
+                                                                    <DataTrigger Binding="{Binding IsDefault}" Value="True">
+                                                                        <Setter TargetName="ItemText" Property="FontWeight" Value="Bold" />
+                                                                    </DataTrigger>
+                                                                    <DataTrigger Binding="{Binding IsGreyed}" Value="True">
+                                                                        <Setter TargetName="ItemText" Property="Foreground" Value="{DynamicResource TextFillColorDisabledBrush}" />
+                                                                    </DataTrigger>
+                                                                    <DataTrigger Binding="{Binding IsHidden}" Value="True">
+                                                                        <Setter TargetName="ItemText" Property="TextDecorations" Value="Strikethrough" />
+                                                                        <Setter TargetName="ItemText" Property="Foreground" Value="{DynamicResource TextFillColorDisabledBrush}" />
+                                                                        <Setter TargetName="IconBox" Property="Opacity" Value="0.4" />
+                                                                    </DataTrigger>
+                                                                    <DataTrigger Binding="{Binding IsShowMore}" Value="True">
+                                                                        <Setter TargetName="Row" Property="Cursor" Value="Hand" />
+                                                                    </DataTrigger>
+                                                                    <DataTrigger Binding="{Binding HasSubmenu}" Value="True">
+                                                                        <Setter TargetName="Row" Property="Cursor" Value="Hand" />
+                                                                    </DataTrigger>
+                                                                </DataTemplate.Triggers>
+                                                            </DataTemplate>
+                                                        </ItemsControl.ItemTemplate>
+                                                    </ItemsControl>
+                                                </StackPanel>
+                                            </Border>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                        <Border Background="#88000000" CornerRadius="6" Padding="14,8" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                Visibility="{Binding IsLoading, Converter={StaticResource BoolToVis}}">
+                            <StackPanel Orientation="Horizontal">
+                                <ProgressBar IsIndeterminate="True" Width="80" Height="4" Margin="0,0,10,0" VerticalAlignment="Center" />
+                                <TextBlock Text="{v:T Pv_RealLoading}" Foreground="White" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </Border>
+
+                <!-- Status / notes -->
+                <StackPanel Grid.Row="3" Margin="24,0,24,12">
+                    <ItemsControl ItemsSource="{Binding Notes}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Style="{StaticResource Banner}" Background="{StaticResource BadgeInfoBg}" Margin="0,0,0,6">
+                                    <TextBlock Text="{Binding}" TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="{Binding RealStatus}" TextWrapping="Wrap" Margin="0,0,0,4" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               Visibility="{Binding RealStatus, Converter={StaticResource BoolToVis}}" />
+                    <TextBlock Text="{Binding Counts}" FontWeight="SemiBold" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    <TextBlock Style="{StaticResource Secondary}" Text="{v:T Pv_Legend}" TextWrapping="Wrap" FontSize="12" />
+                </StackPanel>
+            </Grid>
+
             <!-- ================= Page: ShellNew ================= -->
             <Grid Grid.Column="1" Margin="24,16" DataContext="{Binding ShellNewPage}"
                   Visibility="{Binding DataContext.CurrentPage, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource EqualsToVis}, ConverterParameter=ShellNew}">

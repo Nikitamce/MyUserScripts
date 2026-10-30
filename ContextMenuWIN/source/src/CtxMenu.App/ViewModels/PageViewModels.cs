@@ -100,7 +100,7 @@ public sealed class Win11PageViewModel : ObservableObject
     public bool ClassicMenu
     {
         get => _main.Win11.IsClassicMenuEnabled;
-        set => _main.Apply(() => _main.Win11.SetClassicMenu(value), false, this);
+        set => _main.Apply(() => _main.Win11.SetClassicMenu(value), false, this, after: () => _main.Later(_main.PreviewPage.Rebuild));
     }
 
     public List<EntryViewModel> Packaged => _main.Entries.Where(e => e.IsPackaged).OrderBy(e => e.DisplayName).ToList();

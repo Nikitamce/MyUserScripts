@@ -36,7 +36,7 @@ public static class Glyphs
     };
 }
 
-public enum Page { Entries, ShellNew, Archivers, Win11, Custom, Journal, Settings }
+public enum Page { Entries, Preview, ShellNew, Archivers, Win11, Custom, Journal, Settings }
 
 public sealed class NavItem : ObservableObject
 {

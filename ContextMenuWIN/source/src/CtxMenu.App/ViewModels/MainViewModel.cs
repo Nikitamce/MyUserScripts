@@ -56,6 +56,7 @@ public sealed class MainViewModel : ObservableObject
         CustomPage = new CustomPageViewModel(this);
         JournalPage = new JournalPageViewModel(this);
         SettingsPage = new SettingsPageViewModel(this);
+        PreviewPage = new PreviewPageViewModel(this);
 
         _searchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _searchTimer.Tick += (_, _) => { _searchTimer.Stop(); ApplyFilter(); };
@@ -107,6 +108,7 @@ public sealed class MainViewModel : ObservableObject
     public CustomPageViewModel CustomPage { get; }
     public JournalPageViewModel JournalPage { get; }
     public SettingsPageViewModel SettingsPage { get; }
+    public PreviewPageViewModel PreviewPage { get; }
 
     public ObservableCollection<NavItem> Nav { get; }
     public BulkObservableCollection<EntryViewModel> Entries { get; }
@@ -121,6 +123,7 @@ public sealed class MainViewModel : ObservableObject
             if (!Set(ref _selectedNav, value)) return;
             CurrentPage = value.Page;
             if (value.Page == Page.Entries) ApplyFilter();
+            if (value.Page == Page.Preview) PreviewPage.Rebuild();
         }
     }
 
@@ -199,6 +202,7 @@ public sealed class MainViewModel : ObservableObject
         foreach (var c in Enum.GetValues<MenuCategory>())
             nav.Add(new NavItem { Page = Page.Entries, Category = c, Glyph = Glyphs.For(c), LocKey = "Cat_" + c });
         nav.Add(new NavItem { Page = Page.Entries, IsHeader = true, Glyph = "", LocKey = "Nav_HeaderTools" });
+        nav.Add(new NavItem { Page = Page.Preview, Glyph = "\uE7B3", LocKey = "Nav_Preview" });
         nav.Add(new NavItem { Page = Page.ShellNew, Glyph = "\uE710", LocKey = "Nav_ShellNew" });
         nav.Add(new NavItem { Page = Page.Archivers, Glyph = "\uE7B8", LocKey = "Nav_Archivers" });
         nav.Add(new NavItem { Page = Page.Win11, Glyph = "\uE782", LocKey = "Nav_Win11" });
@@ -314,6 +318,7 @@ public sealed class MainViewModel : ObservableObject
             if (ExtensionFilter.Length > 0) _extScopes = Scanner.GetScopesForExtension(ExtensionFilter);
             ApplyFilter();
             UpdateCounts();
+            PreviewPage.Rebuild();
             Selected = selectedId == null ? null : Entries.FirstOrDefault(e => e.Model.StableId == selectedId);
             Status = Loc.Format("Status_Scanned", Entries.Count, data.entries.Count(e => e.IsThirdParty), data.entries.Count(e => !e.IsEnabled));
         }
@@ -478,6 +483,7 @@ public sealed class MainViewModel : ObservableObject
         CustomPage.RebuildScopes();
         JournalPage.Reload();
         Win11Page.RaiseAll();
+        PreviewPage.OnLanguageChanged();
         RaiseAll();
         ApplyFilter();
     }
