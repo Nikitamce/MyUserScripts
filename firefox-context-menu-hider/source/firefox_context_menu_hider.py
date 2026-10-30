@@ -34,7 +34,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, font as tkfont
 
 APP_NAME = "Context Menu Hider"
-APP_VERSION = "4.5.1"
+APP_VERSION = "4.5.2"
 
 # ==================== КАТЕГОРИИ ====================
 
@@ -969,60 +969,358 @@ ATTR_RE = re.compile(r'([\w:.-]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')')
 POPUP_TAGS = {"menupopup", "popup"}
 RELEVANT_POPUP_RE = re.compile(r"context|sidebar-.*menu|split-view-menu|picontext|popupset", re.I)
 JS_ID_RE = re.compile(r'["\'](context[-_][A-Za-z0-9_-]*[A-Za-z0-9_])["\']')
-FTL_KEY_RE = re.compile(r"^([A-Za-z][\w-]*)\s*=\s*(.*)$")
+FTL_KEY_RE = re.compile(r"^(-?[A-Za-z][\w-]*)\s*=\s*(.*)$")
 FTL_ATTR_RE = re.compile(r"^\s+\.([\w-]+)\s*=\s*(.*)$")
+FTL_VARIANT_RE = re.compile(r"(\*?)\[\s*([^\]\s]+)\s*\]")
+FTL_DEPTH_LIMIT = 6
+DEFAULT_LOCALE = "en-US"
+# Сведения о последнем сканировании (язык меню и т. п.) для строки статуса.
+LAST_SCAN = {"locale": "", "langpack": ""}
 
 
 def parse_ftl(text, out):
+    """Разбирает Fluent (.ftl): сообщения, термы (-brand-...), атрибуты
+    (.label, .accesskey) и многострочные значения с выбором вариантов."""
     key = None
+    attr = None
     for line in text.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("#"):
+            key = None
+            continue
         m = FTL_KEY_RE.match(line)
         if m:
             key = m.group(1)
-            out.setdefault(key, {})["value"] = m.group(2).strip()
+            attr = "value"
+            out[key] = {"value": m.group(2).strip()}
+            continue
+        if key is None:
             continue
         m = FTL_ATTR_RE.match(line)
-        if m and key:
-            out[key][m.group(1)] = m.group(2).strip()
+        if m:
+            attr = m.group(1)
+            out[key][attr] = m.group(2).strip()
+            continue
+        if line[:1] in (" ", "\t"):
+            prev = out[key].get(attr, "")
+            out[key][attr] = (prev + "\n" + line.strip()) if prev else line.strip()
+        else:
+            key = None
 
 
-def clean_ftl_text(s):
+def _ftl_close(s, start):
+    """Индекс закрывающей «}» для «{» в позиции start (или -1)."""
+    depth = 0
+    i = start
+    while i < len(s):
+        ch = s[i]
+        if ch == '"':
+            j = s.find('"', i + 1)
+            i = j if j > 0 else len(s)
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _ftl_variants(body):
+    """[(ключ, по_умолчанию, текст)] из тела выражения выбора."""
+    marks = []
+    depth = 0
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif depth == 0 and ch in "*[":
+            m = FTL_VARIANT_RE.match(body, i)
+            if m:
+                marks.append((m.start(), m.end(), m.group(2), bool(m.group(1))))
+                i = m.end()
+                continue
+        i += 1
+    out = []
+    for n, (_s, e, k, d) in enumerate(marks):
+        end = marks[n + 1][0] if n + 1 < len(marks) else len(body)
+        out.append((k, d, body[e:end]))
+    return out
+
+
+def _ftl_pick(selector, variants, args):
+    selector = selector.strip()
+    keys = {k: t for k, _d, t in variants}
+    wanted = []
+    if selector.startswith("PLATFORM"):
+        wanted = ["windows", "other"]
+    elif selector.startswith("$"):
+        val = (args or {}).get(selector[1:].split()[0].strip("()"))
+        if val is not None:
+            wanted.append(str(val))
+            if str(val) == "1":
+                wanted.append("one")
+        else:
+            # В контекстном меню обычно одна вкладка/один пункт.
+            wanted = ["1", "one"]
+    for k in wanted:
+        if k in keys:
+            return keys[k]
+    for k, d, t in variants:
+        if d:
+            return t
+    return variants[0][2] if variants else ""
+
+
+def ftl_resolve(ftl, s, args=None, depth=0):
+    """Превращает шаблон Fluent в готовую строку, как её показывает браузер."""
+    if not s or depth > FTL_DEPTH_LIMIT:
+        return ""
+    out = []
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch != "{":
+            out.append(ch)
+            i += 1
+            continue
+        j = _ftl_close(s, i)
+        if j < 0:
+            break
+        inner = s[i + 1:j].strip()
+        i = j + 1
+        arrow = -1
+        d = 0
+        for k in range(len(inner) - 1):
+            if inner[k] == "{":
+                d += 1
+            elif inner[k] == "}":
+                d -= 1
+            elif d == 0 and inner[k:k + 2] == "->":
+                arrow = k
+                break
+        if arrow >= 0:
+            chosen = _ftl_pick(inner[:arrow], _ftl_variants(inner[arrow + 2:]), args)
+            out.append(ftl_resolve(ftl, chosen, args, depth + 1))
+        elif inner.startswith('"') and inner.endswith('"') and len(inner) >= 2:
+            out.append(inner[1:-1])
+        elif inner.startswith("$"):
+            name = inner[1:].split()[0]
+            val = (args or {}).get(name)
+            out.append("" if val is None else str(val))
+        else:
+            m = re.match(r"(-?[A-Za-z][\w-]*)(?:\.([\w-]+))?", inner)
+            if m and m.group(1) in ftl:
+                entry = ftl[m.group(1)]
+                out.append(ftl_resolve(ftl, entry.get(m.group(2) or "value", ""),
+                                       args, depth + 1))
+    return "".join(out)
+
+
+def clean_ftl_text(s, ftl=None, args=None):
     if not s:
         return ""
-    if "->" in s:
-        variants = re.findall(r"\[[^\]]+\]\s*([^{}]+?)(?=\s*\[|$)", s, re.S)
-        if variants:
-            s = " ".join(v.strip() for v in variants)
-            return re.sub(r"\s+", " ", s).strip(" :")
-    s = re.sub(r"\{[^}]*\}", "", s)
-    s = re.sub(r"\(\s*\)", "", s)
+    s = ftl_resolve(ftl or {}, s, args)
+    s = re.sub(r"\(\s*\)|«\s*»|„\s*“|\"\s*\"", "", s)
     return re.sub(r"\s+", " ", s).strip(" :")
 
 
-def ftl_label(ftl, l10n_id):
-    entry = ftl.get(l10n_id)
+def ftl_label(ftl, l10n_id, args=None):
+    entry = ftl.get(l10n_id) if l10n_id else None
     if not entry:
         return ""
     for k in ("label", "aria-label", "value", "tooltiptext"):
-        t = clean_ftl_text(entry.get(k, ""))
+        t = clean_ftl_text(entry.get(k, ""), ftl, args)
         if t:
             return t
     return ""
 
 
-def load_ftl_from(omni, ftl):
-    if not omni:
-        return
+def ftl_accesskey(ftl, l10n_id, args=None):
+    entry = ftl.get(l10n_id) if l10n_id else None
+    if not entry or not entry.get("accesskey"):
+        return ""
+    return clean_ftl_text(entry["accesskey"], ftl, args)[:1]
+
+
+def omni_locales(omni):
+    """Языки, локализация которых лежит в omni.ja / языковом пакете."""
+    found = set()
     try:
         names = omni.names()
     except Exception:
-        return
+        return found
     for n in names:
-        if n.startswith("localization/en-US/") and n.endswith(".ftl"):
+        parts = n.split("/")
+        if len(parts) > 2 and parts[0] == "localization":
+            found.add(parts[1])
+        elif len(parts) > 3 and parts[0] == "browser" and parts[1] == "localization":
+            found.add(parts[2])
+    return found
+
+
+def load_ftl_from(omni, ftl, locale=DEFAULT_LOCALE):
+    if not omni:
+        return 0
+    try:
+        names = omni.names()
+    except Exception:
+        return 0
+    prefixes = ("localization/%s/" % locale, "browser/localization/%s/" % locale)
+    count = 0
+    for n in names:
+        if n.startswith(prefixes) and n.endswith(".ftl"):
             try:
                 parse_ftl(omni.read_text(n), ftl)
+                count += 1
             except Exception:
                 continue
+    return count
+
+
+def read_profile_prefs(profile):
+    """Значения user_pref(...) из prefs.js и user.js профиля."""
+    prefs = {}
+    if not profile:
+        return prefs
+    for name in ("prefs.js", "user.js"):
+        try:
+            text = (Path(profile) / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for m in re.finditer(r'^\s*user_pref\(\s*"([^"]+)"\s*,\s*(.+?)\s*\)\s*;',
+                             text, re.M):
+            val = m.group(2).strip()
+            if val.startswith('"') and val.endswith('"'):
+                val = val[1:-1].replace('\\"', '"')
+            prefs[m.group(1)] = val
+    return prefs
+
+
+def find_langpacks(profile):
+    """{язык: путь к .xpi} — языковые пакеты, установленные в профиль."""
+    packs = {}
+    if not profile:
+        return packs
+    ext_dir = Path(profile) / "extensions"
+    try:
+        files = sorted(ext_dir.glob("langpack-*.xpi"))
+    except OSError:
+        return packs
+    for f in files:
+        m = re.match(r"langpack-([A-Za-z]{2,3}(?:-[A-Za-z0-9]+)*)@", f.name)
+        if m:
+            packs.setdefault(m.group(1), f)
+    return packs
+
+
+def choose_locale(available, prefs):
+    """Язык интерфейса, который реально использует браузер."""
+    requested = prefs.get("intl.locale.requested", "")
+    for loc in [x.strip() for x in requested.split(",") if x.strip()]:
+        if loc in available:
+            return loc
+        base = loc.split("-")[0]
+        for a in sorted(available):
+            if a.split("-")[0] == base:
+                return a
+    if requested.strip():
+        return DEFAULT_LOCALE
+    # Без явной настройки браузер берёт язык своей сборки.
+    others = sorted(a for a in available if a != DEFAULT_LOCALE)
+    if "ru" in others:
+        return "ru"
+    return others[0] if others else DEFAULT_LOCALE
+
+
+class L10n:
+    """Подписи браузера: язык интерфейса поверх en-US."""
+
+    def __init__(self):
+        self.en = {}
+        self.loc = {}
+        self.merged = {}
+        self.locale = DEFAULT_LOCALE
+        self.args = {}
+
+    def finish(self):
+        self.merged = dict(self.en)
+        self.merged.update(self.loc)
+
+    def label(self, l10n_id, args=None):
+        a = dict(self.args)
+        a.update(args or {})
+        return ftl_label(self.merged, l10n_id, a)
+
+    def label_en(self, l10n_id, args=None):
+        a = dict(self.args)
+        a.update(args or {})
+        return ftl_label(self.en, l10n_id, a)
+
+    def is_fallback(self, l10n_id):
+        """Строки нет на языке браузера — он и сам покажет английскую."""
+        return self.locale != DEFAULT_LOCALE and l10n_id not in self.loc
+
+    def accesskey(self, l10n_id):
+        if l10n_id in self.loc:
+            return ftl_accesskey(self.loc, l10n_id)
+        return ftl_accesskey(self.en, l10n_id)
+
+
+# Пункты, подпись которых браузер ставит из JS (в разметке её нет).
+# id -> (основной l10n-id, другой вариант подписи или None)
+JS_L10N_HINTS = {
+    "context_toggleMuteTab": ("tabbrowser-context-mute-tab", "tabbrowser-context-unmute-tab"),
+    "context_toggleMuteSelectedTabs": ("tabbrowser-context-mute-selected-tabs",
+                                       "tabbrowser-context-unmute-selected-tabs"),
+    "context_moveTabToSplitView": ("tab-context-add-split-view", "tab-context-open-in-split-view"),
+    "context_sendTabToDevice": ("tab-context-send-to-device", "tab-context-send-to-mobile"),
+    "context_askChat": ("@askchat", None),
+    "context-ask-chat": ("@askchat", None),
+}
+JS_L10N_FORCE = {"context_toggleMuteTab", "context_toggleMuteSelectedTabs",
+                 "context_moveTabToSplitView"}
+
+# Пункты без id, которые браузер создаёт из JS. Ключ — CSS-селектор.
+# (селектор, меню, тег, l10n-id, файл-признак в omni.ja)
+JS_SELECTOR_ITEMS = [
+    ("#tabContextMenu > menu.share-tab-url-item", "tabContextMenu", "menu",
+     "tab-context-share-url", "SharingUtils.sys.mjs"),
+]
+
+GENAI_PROVIDER_RE = re.compile(
+    r'\[\s*"(https?://[^"]+)"\s*,\s*\{(?:(?!\]\s*,\s*\[).)*?\bname:\s*"([^"]+)"', re.S)
+
+
+def genai_provider_name(omnis, prefs):
+    """Имя выбранного ИИ-чат-бота (browser.ml.chat.provider), как в браузере."""
+    url = prefs.get("browser.ml.chat.provider", "")
+    if not url:
+        return ""
+    for o in omnis:
+        try:
+            names = o.names()
+        except Exception:
+            continue
+        for n in names:
+            if n.endswith("GenAI.sys.mjs"):
+                try:
+                    text = o.read_text(n)
+                except Exception:
+                    continue
+                for m in GENAI_PROVIDER_RE.finditer(text):
+                    if m.group(1) == url:
+                        return m.group(2)
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url).hostname or ""
+    except Exception:
+        return ""
 
 
 # ---------- Floorp: подписи и пункты, которые вставляет JS ----------
@@ -1407,7 +1705,7 @@ def scan_floorp_js(omni, ftl, found):
                                 label, "menuitem", popup, selector)
 
 
-def scan_xhtml(text, ftl, found):
+def scan_xhtml(text, l10n, found):
     """Разбирает один xhtml/inc: ищет пункты внутри контекстных menupopup."""
     text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
     stack = []
@@ -1431,48 +1729,128 @@ def scan_xhtml(text, ftl, found):
         root = next((p for p in stack if p and RELEVANT_POPUP_RE.search(p)), None)
         if not root:
             continue
-        label = ""
-        for l10n_attr in ("data-l10n-id", "data-lazy-l10n-id", "data-alt-l10n-id"):
-            if attrs.get(l10n_attr):
-                label = ftl_label(ftl, attrs[l10n_attr])
-                if label:
-                    break
+        primary = attrs.get("data-l10n-id") or attrs.get("data-lazy-l10n-id") or ""
+        alt = attrs.get("data-alt-l10n-id") or ""
+        args = {}
+        if attrs.get("data-l10n-args"):
+            try:
+                args = json.loads(attrs["data-l10n-args"].replace("&quot;", '"'))
+            except Exception:
+                args = {}
+        label = l10n.label(primary, args) if primary else ""
+        used = primary if label else ""
+        if not label and alt:
+            label = l10n.label(alt, args)
+            used = alt if label else ""
+        alt_label = ""
+        if alt and used != alt:
+            alt_label = l10n.label(alt, args)
+            if alt_label == label:
+                alt_label = ""
         if not label and attrs.get("label") and "&" not in attrs["label"]:
             label = attrs["label"]
+        details = {}
+        if used:
+            details = {
+                "l10n": used,
+                "label_en": l10n.label_en(used, args),
+                "accesskey": l10n.accesskey(used),
+                "fallback_en": l10n.is_fallback(used),
+            }
+        if alt_label:
+            details["alt_label"] = alt_label
         hidden = attrs.get("hidden") == "true"
         prev = found.get(iid)
         if prev is None:
-            found[iid] = {
+            info = {
                 "popup": root, "label": label, "tag": lname, "hidden": hidden,
             }
+            info.update(details)
+            found[iid] = info
         else:
             if label and not prev["label"]:
                 prev["label"] = label
+                prev.update(details)
             if not prev.get("popup"):
                 prev["popup"] = root
 
 
-def scan_browser(install_dir):
-    """Возвращает ({id: {popup, label, tag, hidden}}, версия браузера)."""
+def apply_js_l10n_hints(found, l10n, provider):
+    """Подписи для пунктов, которым браузер задаёт текст из JS."""
+    for iid, (pid, alt) in JS_L10N_HINTS.items():
+        info = found.get(iid)
+        if not info:
+            continue
+        if pid == "@askchat":
+            if provider:
+                pid, alt = "genai-menu-ask-provider-2", "genai-menu-ask-generic-2"
+            else:
+                pid, alt = "genai-menu-ask-generic-2", None
+        label = l10n.label(pid)
+        if not label:
+            continue
+        if (iid in JS_L10N_FORCE or not info.get("label")
+                or pid.startswith("genai-") or not info.get("l10n")):
+            info["label"] = label
+            info["l10n"] = pid
+            info["label_en"] = l10n.label_en(pid)
+            info["accesskey"] = l10n.accesskey(pid)
+            info["fallback_en"] = l10n.is_fallback(pid)
+        if alt:
+            alt_label = l10n.label(alt)
+            if alt_label and alt_label != info["label"]:
+                info["alt_label"] = alt_label
+
+
+def scan_browser(install_dir, profile=None):
+    """Возвращает ({id: {popup, label, tag, hidden, ...}}, версия браузера).
+
+    Подписи берутся из локализации самого браузера (omni.ja и языковой
+    пакет в профиле) на том языке, который выбран в браузере."""
     omnis = find_omni_files(install_dir)
     if not omnis:
         raise FileNotFoundError("omni.ja не найден в " + str(install_dir))
     browser_omni, platform_omni = omnis
-    ftl = {}
+    ob = Omni(browser_omni) if browser_omni else None
+    op = Omni(platform_omni) if platform_omni else None
+    all_omni = [o for o in (op, ob) if o]
     found = {}
     js_ids = set()
 
+    prefs = read_profile_prefs(profile)
+    packs = find_langpacks(profile)
+    available = set(packs)
+    for o in all_omni:
+        available |= omni_locales(o)
+    l10n = L10n()
+    l10n.locale = choose_locale(available, prefs)
     # Локализация из platform omni нужна раньше разбора xhtml: там лежат
     # подписи буфера обмена, орфографии и паролей.
-    load_ftl_from(Omni(platform_omni) if platform_omni else None, ftl)
-    if browser_omni:
-        ob = Omni(browser_omni)
+    for o in all_omni:
+        load_ftl_from(o, l10n.en, DEFAULT_LOCALE)
+    langpack = ""
+    if l10n.locale != DEFAULT_LOCALE:
+        if l10n.locale in packs:
+            try:
+                if load_ftl_from(Omni(str(packs[l10n.locale])), l10n.loc, l10n.locale):
+                    langpack = packs[l10n.locale].name
+            except Exception:
+                langpack = ""
+        for o in all_omni:
+            load_ftl_from(o, l10n.loc, l10n.locale)
+    l10n.finish()
+    provider = genai_provider_name(all_omni, prefs)
+    if provider:
+        l10n.args["provider"] = provider
+    LAST_SCAN["locale"] = l10n.locale
+    LAST_SCAN["langpack"] = langpack
+
+    if ob:
         names = ob.names()
-        load_ftl_from(ob, ftl)
         for n in names:
             if n.startswith("chrome/browser/content/") and n.endswith((".xhtml", ".xul", ".inc")):
                 try:
-                    scan_xhtml(ob.read_text(n), ftl, found)
+                    scan_xhtml(ob.read_text(n), l10n, found)
                 except Exception:
                     continue
         for n in names:
@@ -1483,11 +1861,29 @@ def scan_browser(install_dir):
                 except Exception:
                     pass
 
-    if platform_omni:
+    if op:
         try:
-            scan_floorp_js(Omni(platform_omni), ftl, found)
+            scan_floorp_js(op, l10n.merged, found)
         except Exception:
             pass
+
+    apply_js_l10n_hints(found, l10n, provider)
+
+    all_names = set()
+    for o in all_omni:
+        try:
+            all_names.update(n.rsplit("/", 1)[-1] for n in o.names())
+        except Exception:
+            pass
+    for selector, popup, tag, l10n_id, marker in JS_SELECTOR_ITEMS:
+        key = SEL_PREFIX + selector
+        if marker in all_names and key not in found:
+            found[key] = {
+                "popup": popup, "label": l10n.label(l10n_id), "tag": tag,
+                "dynamic": True, "hidden": False, "selector": selector,
+                "l10n": l10n_id, "label_en": l10n.label_en(l10n_id),
+                "accesskey": l10n.accesskey(l10n_id),
+            }
 
     for iid in js_ids:
         if iid not in found and not iid.endswith("-popup"):
@@ -1704,10 +2100,11 @@ def infer_category(iid, popup, dynamic=False, tag="?"):
 
 
 def label_for_item(iid, info):
-    label = KNOWN_LABEL.get(iid)
+    # Сначала подпись, которую показывает сам браузер, потом встроенный перевод.
+    label = (info or {}).get("label", "") if info else ""
     if label:
         return label
-    label = (info or {}).get("label", "") if info else ""
+    label = KNOWN_LABEL.get(iid)
     if label:
         return label
     tag = (info or {}).get("tag", "") if info else ""
@@ -1747,6 +2144,38 @@ def make_entry(key, label, id_text, category, kind="browser", tag="",
     }
 
 
+def add_l10n_details(e, info, builtin):
+    """Клавиша доступа, другой вариант подписи и встроенный перевод:
+    показываются второй строкой и участвуют в поиске."""
+    info = info or {}
+    accesskey = (info.get("accesskey") or "").strip()
+    alt_label = info.get("alt_label") or ""
+    extra = [alt_label, info.get("label_en") or "", info.get("l10n") or ""]
+    note = ""
+    if builtin and builtin.strip().lower() != (e["label"] or "").strip().lower():
+        extra.append(builtin)
+        untranslated = (LAST_SCAN.get("locale", DEFAULT_LOCALE) != DEFAULT_LOCALE
+                        and info.get("label") and info.get("label") == info.get("label_en"))
+        if (not LAST_SCAN.get("locale", "").startswith("ru") or e.get("missing")
+                or info.get("fallback_en") or untranslated):
+            note = builtin
+    e["accesskey"] = accesskey
+    e["alt_label"] = alt_label
+    e["builtin_label"] = note
+    e["search"] += " " + " ".join(x for x in extra if x).lower()
+
+
+def entry_meta_text(entry):
+    parts = [entry.get("id_text", "")]
+    if entry.get("accesskey"):
+        parts.append("клавиша " + entry["accesskey"].upper())
+    if entry.get("alt_label"):
+        parts.append("также: " + entry["alt_label"])
+    if entry.get("builtin_label"):
+        parts.append(entry["builtin_label"])
+    return "  ·  ".join(p for p in parts if p)
+
+
 def build_entries(scanned, scan_ok, extensions, new_ids):
     """Собирает все пункты для интерфейса."""
     entries = {}
@@ -1762,11 +2191,12 @@ def build_entries(scanned, scan_ok, extensions, new_ids):
             else:
                 info = info or {}
                 e = make_entry(
-                    iid, label, iid, category, tag=info.get("tag", ""),
-                    popup=info.get("popup"),
+                    iid, info.get("label") or label, iid, category,
+                    tag=info.get("tag", ""), popup=info.get("popup"),
                 )
             e["new"] = iid in new_ids
             e["dynamic"] = bool((info or {}).get("dynamic"))
+            add_l10n_details(e, info, label)
             entries[iid] = e
 
     # Найденные в браузере, но не описанные в словаре.
@@ -1790,6 +2220,7 @@ def build_entries(scanned, scan_ok, extensions, new_ids):
             )
         e["new"] = iid in new_ids
         e["dynamic"] = bool(info.get("dynamic"))
+        add_l10n_details(e, info, KNOWN_LABEL.get(iid, ""))
         entries[iid] = e
 
     # Особые правила расширений.
@@ -1891,7 +2322,7 @@ def generate_css(keys, ext_names=None, raw_selectors=None):
         has_rules = True
         lines += [
             "",
-            "/* Пункты Floorp без постоянного ID */",
+            "/* Пункты без постоянного ID (Floorp, «Поделиться» и т. п.) */",
             ",\n".join(managed_selectors) + " {",
             "  display: none !important;",
             "}",
@@ -3722,7 +4153,7 @@ class FirefoxContextMenuHider:
                 meta_text = (f'{entry["id_text"]}  ·  '
                              f'{entry.get("ext_id", "")}')
             else:
-                meta_text = entry.get("id_text", "")
+                meta_text = entry_meta_text(entry)
             canvas.create_text(48, height / 2 + self._meta_dy,
                                text=shorten(meta_text, 68), anchor="w",
                                fill=pal["dim"], font=self.fonts["mono"])
@@ -4578,7 +5009,7 @@ class FirefoxContextMenuHider:
         scanned, version, error = {}, "", ""
         if install:
             try:
-                scanned, version = scan_browser(install)
+                scanned, version = scan_browser(install, prof)
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
         self.scan_ok = bool(install) and not error
@@ -4653,10 +5084,13 @@ class FirefoxContextMenuHider:
             self._set_status("Браузер не найден. Показан встроенный список пунктов.")
         else:
             count = sum(1 for e in self.entries.values() if not e["missing"])
+            lang = LAST_SCAN.get("locale") or DEFAULT_LOCALE
+            if LAST_SCAN.get("langpack"):
+                lang += " (языковой пакет)"
             self._set_status(
                 f"Готово · {self.browser_name} {self.browser_version} · "
                 f"{count} {plural_ru(count, 'пункт', 'пункта', 'пунктов')} · "
-                f"профиль {Path(prof).name}")
+                f"подписи: {lang} · профиль {Path(prof).name}")
         self._loading = False
         if notify_error and error:
             self._toast("Ошибка чтения браузера: " + error, "err")
