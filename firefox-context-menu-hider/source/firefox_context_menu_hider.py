@@ -34,7 +34,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, font as tkfont
 
 APP_NAME = "Context Menu Hider"
-APP_VERSION = "4.5"
+APP_VERSION = "4.5.1"
 
 # ==================== КАТЕГОРИИ ====================
 
@@ -831,8 +831,40 @@ def find_profiles():
             home / ".mozilla", home / ".floorp", home / ".librewolf",
             home / ".waterfox", home / "Library" / "Application Support",
         ]
-    names = ("firefox", "floorp", "librewolf", "waterfox", "zen")
+    # «mozilla» нужен для обычного Firefox: его профили лежат
+    # в %APPDATA%\Mozilla\Firefox\Profiles, а не в папке с «firefox» в имени.
+    names = ("mozilla", "firefox", "floorp", "librewolf", "waterfox", "zen")
     found, seen = [], set()
+
+    def add_one(p):
+        try:
+            if p.is_dir() and ((p / "prefs.js").exists() or (p / "extensions.json").exists()):
+                s = str(p)
+                if s not in found:
+                    found.append(s)
+        except OSError:
+            pass
+
+    def add_from_ini(base):
+        """Профили из profiles.ini, в том числе созданные в другой папке."""
+        ini = base / "profiles.ini"
+        try:
+            if not ini.is_file():
+                return
+            lines = ini.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            return
+        path, relative = None, True
+        for line in lines + ["["]:
+            line = line.strip()
+            if line.startswith("["):
+                if path:
+                    add_one((base / path) if relative else Path(path))
+                path, relative = None, True
+            elif line.startswith("Path="):
+                path = line[5:].strip().replace("/", os.sep)
+            elif line.startswith("IsRelative="):
+                relative = line[11:].strip() != "0"
 
     def add_profiles(base):
         if not base.is_dir() or base in seen:
@@ -855,6 +887,8 @@ def find_profiles():
         try:
             for item in root.iterdir():
                 if item.is_dir() and any(x in item.name.lower() for x in names):
+                    add_from_ini(item)
+                    add_from_ini(item / "Firefox")
                     add_profiles(item)
                     add_profiles(item / "Profiles")
                     add_profiles(item / "Firefox" / "Profiles")
@@ -868,10 +902,14 @@ def find_profiles():
             pass
 
     def mtime(p):
-        try:
-            return Path(p).stat().st_mtime
-        except OSError:
-            return 0
+        # prefs.js браузер переписывает при каждом закрытии, поэтому его
+        # время точнее показывает, каким профилем пользовались последним.
+        for probe in (Path(p) / "prefs.js", Path(p)):
+            try:
+                return probe.stat().st_mtime
+            except OSError:
+                continue
+        return 0
 
     found.sort(key=mtime, reverse=True)
     return found
@@ -2241,22 +2279,33 @@ def parse_custom_lines(text):
     return ids, selectors, lines
 
 
-def userchrome_pref_state(profile):
-    """True/False/None — включены ли стили userChrome в этом профиле."""
-    p = Path(profile) / "prefs.js"
-    if not p.is_file():
-        return None
-    try:
-        text = p.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return None
-    for line in text.splitlines():
-        if "toolkit.legacyUserProfileCustomizations.stylesheets" in line:
-            if re.search(r",\s*true\s*\)", line):
-                return True
-            if re.search(r",\s*false\s*\)", line):
-                return False
-    return None
+def userchrome_pref_state(profile, browser_name=""):
+    """True/False/None — включены ли стили userChrome в этом профиле.
+
+    user.js применяется после prefs.js, поэтому его значение главнее.
+    Если параметр нигде не задан, у обычного Firefox он по умолчанию
+    выключен (False); у Floorp, Zen и других сборок значение по умолчанию
+    может отличаться, поэтому для них возвращается None."""
+    state = None
+    for name in ("prefs.js", "user.js"):
+        p = Path(profile) / name
+        if not p.is_file():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line.lstrip().startswith("//"):
+                continue
+            if "toolkit.legacyUserProfileCustomizations.stylesheets" in line:
+                if re.search(r",\s*true\s*\)", line):
+                    state = True
+                elif re.search(r",\s*false\s*\)", line):
+                    state = False
+    if state is None and browser_name == "Firefox":
+        return False
+    return state
 
 
 # ==================== ИНТЕРФЕЙС ====================
@@ -4573,7 +4622,8 @@ class FirefoxContextMenuHider:
             str(self.cfg.get("custom", "") or ""), extras)
         self.saved_sig = (tuple(sorted(applied_checks)),
                           self._normalized_lines("\n".join(extras)))
-        self.pref_state = userchrome_pref_state(prof) if prof else None
+        self.pref_state = (userchrome_pref_state(prof, self.browser_name)
+                           if prof else None)
 
         self.cfg["last_profile"] = str(prof) if prof else ""
         self.cfg["last_install"] = str(install) if install else ""
@@ -4821,7 +4871,7 @@ class FirefoxContextMenuHider:
         self.state_external = external
         self.saved_state = set(self.checks)
         self.saved_sig = self._signature()
-        self.pref_state = userchrome_pref_state(profile)
+        self.pref_state = userchrome_pref_state(profile, self.browser_name)
         self.cfg["last_profile"] = str(profile)
         self.cfg["custom"] = self.custom_text
         save_config(self.cfg)

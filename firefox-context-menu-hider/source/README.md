@@ -1,0 +1,59 @@
+# Context Menu Hider для Firefox (исходный код)
+
+Программа скрывает пункты контекстных меню Firefox, Floorp, LibreWolf, Waterfox и Zen. Отмеченные пункты записываются в `userChrome.css` выбранного профиля.
+
+Готовый exe лежит в папке [`../bin`](../bin). Python для него не нужен.
+
+## Возможности
+
+- Пункты меню читаются прямо из `omni.ja` установленного браузера и подписываются по-русски.
+- Разделы по действиям (ссылки, изображения, медиа, выделение текста, поля ввода, вкладки и другие) и по меню браузера (боковая панель, закладки, панели инструментов, загрузки и другие).
+- «Все пункты» с поиском, «Выбранные», «Новое» (пункты, которые появились после обновления браузера), «Нет в этой версии».
+- Расширения берутся из `extensions.json` профиля. Одна галочка скрывает все пункты расширения, в том числе созданные динамически.
+- «Свои ID»: собственные ID и CSS-селекторы.
+- Перед записью создаётся резервная копия `userChrome.css.bak-…` (хранятся последние 10). Секция программы между маркерами заменяется целиком, остальной CSS не трогается.
+- Проверка и автоисправление незакрытых скобок в CSS.
+- Тёмная и светлая темы, сохранение профиля и настроек в `%APPDATA%\ContextMenuHider`.
+- Горячие клавиши: Ctrl+F поиск, Ctrl+S применить, F5 пересканировать, Ctrl+Tab и Ctrl+1…9 переход по разделам, Esc очистить поиск.
+
+## Важно
+
+Firefox читает `userChrome.css` только если в `about:config` параметр `toolkit.legacyUserProfileCustomizations.stylesheets` равен `true`. После изменения меню браузер нужно полностью перезапустить.
+
+## Запуск из исходников
+
+Нужен Python 3.9 или новее с tkinter (обычный установщик с python.org подходит). Сторонних библиотек нет.
+
+```bat
+python firefox_context_menu_hider.py
+```
+
+## Сборка exe
+
+На Windows запустите `build.bat` из этой папки. Он установит PyInstaller и соберёт `dist\FirefoxContextMenuHider.exe`.
+
+Вручную то же самое:
+
+```bat
+python -m pip install --upgrade pyinstaller
+python -m PyInstaller --noconfirm --clean --onefile --windowed ^
+  --name FirefoxContextMenuHider --icon icon.ico --version-file version_info.txt ^
+  --exclude-module unittest --exclude-module pydoc --exclude-module test ^
+  firefox_context_menu_hider.py
+```
+
+Файлы в папке:
+
+- `firefox_context_menu_hider.py`: вся программа;
+- `icon.ico`: иконка exe;
+- `version_info.txt`: сведения о версии в свойствах exe;
+- `build.bat`: сборка exe.
+
+Exe в `../bin` собран PyInstaller 6.22 на Python 3.12.10 (64-бит).
+
+## Изменения в 4.5.1
+
+- Обычный Firefox теперь находится автоматически: раньше программа не заглядывала в `%APPDATA%\Mozilla\Firefox\Profiles`.
+- Профили читаются и из `profiles.ini`, поэтому находятся и профили, созданные в другой папке.
+- Самым свежим считается профиль, у которого недавно менялся `prefs.js`.
+- Если параметр `toolkit.legacyUserProfileCustomizations.stylesheets` не задан, у Firefox он выключен по умолчанию. Теперь программа об этом предупреждает. Также учитывается `user.js`.
